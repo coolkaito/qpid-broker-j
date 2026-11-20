@@ -71,13 +71,13 @@ public class WebSocketCloseTimeoutTest extends WebSocketCloseTestBase
             assertTrue(getBrokerAdmin().isConnectionRegistered(containerId),
                     "Connection was not registered after the AMQP open");
 
-            final CompletableFuture<Long> tcpClosedAt = new CompletableFuture<>();
-            transport.getChannelCloseFuture().addListener(future -> tcpClosedAt.complete(System.currentTimeMillis()));
+            final CompletableFuture<Long> tcpClosedAtNanos = new CompletableFuture<>();
+            transport.getChannelCloseFuture().addListener(future -> tcpClosedAtNanos.complete(System.nanoTime()));
             assertTimeoutPreemptively(CLOSE_COMPLETION_TIMEOUT, () ->
             {
-                final long closeRequested = System.currentTimeMillis();
-                final CompletableFuture<Long> closedAt = getBrokerAdmin().closeConnectionAsync(containerId)
-                        .thenApply(ignored -> System.currentTimeMillis());
+                final long closeRequestedNanos = System.nanoTime();
+                final CompletableFuture<Long> closedAtNanos = getBrokerAdmin().closeConnectionAsync(containerId)
+                        .thenApply(ignored -> System.nanoTime());
                 interaction.consumeResponse(Close.class);
                 // A one-second heartbeat gives the broker a two-second read-idle timeout.
                 assertFalse(transport.awaitWebSocketCloseFrame(PEER_REPLY_DELAY.toMillis(), TimeUnit.MILLISECONDS),
@@ -90,9 +90,9 @@ public class WebSocketCloseTimeoutTest extends WebSocketCloseTestBase
                             "Broker did not send WebSocket Close after the AMQP Close response");
                 }
 
-                assertTrue(closedAt.get() - closeRequested >= CLOSE_RESPONSE_TIMEOUT.toMillis(),
+                assertTrue(closedAtNanos.get() - closeRequestedNanos >= CLOSE_RESPONSE_TIMEOUT.toNanos(),
                         "Broker disconnected before the shared close deadline");
-                assertTrue(tcpClosedAt.get() - closeRequested >= CLOSE_RESPONSE_TIMEOUT.toMillis(),
+                assertTrue(tcpClosedAtNanos.get() - closeRequestedNanos >= CLOSE_RESPONSE_TIMEOUT.toNanos(),
                         "TCP closed before the shared close deadline");
                 assertFalse(getBrokerAdmin().isConnectionRegistered(containerId),
                         "Connection remained registered after the shared close deadline expired");
