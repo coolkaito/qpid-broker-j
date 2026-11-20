@@ -310,10 +310,14 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
                         if (processPendingComplete || _delegate.needsReadForWrite())
                         {
                             final boolean dataRead = doRead();
-                            // Processing incoming frames may close the connection or start its close deadline.
+                            // Processing incoming frames may start or complete the protocol close.
                             if (isCloseDeadlineExpired())
                             {
                                 abort();
+                            }
+                            else if (_protocolEngine.isProtocolCloseComplete())
+                            {
+                                close();
                             }
 
                             if (!_closed.get())

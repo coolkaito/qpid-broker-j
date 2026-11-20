@@ -30,6 +30,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import java.time.Duration;
 import java.util.Random;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -126,6 +127,8 @@ public class WebSocketCompressedCloseTimeoutTest extends BrokerAdminUsingTestBas
                 closeFuture.get();
 
                 transport.getChannelCloseFuture().sync();
+                assertFalse(transport.awaitWebSocketCloseFrame(100L, TimeUnit.MILLISECONDS),
+                        "Broker started WebSocket close before the AMQP Close exchange completed");
                 assertFalse(getBrokerAdmin().isConnectionRegistered(containerId),
                         "Connection remained registered after the shared close deadline expired");
             }, "Broker did not complete close within the shared deadline and scheduling allowance");

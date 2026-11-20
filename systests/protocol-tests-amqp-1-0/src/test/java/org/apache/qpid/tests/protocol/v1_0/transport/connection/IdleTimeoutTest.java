@@ -23,13 +23,17 @@ package org.apache.qpid.tests.protocol.v1_0.transport.connection;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import org.apache.qpid.server.model.Connection;
 import org.apache.qpid.server.model.port.AmqpPort;
@@ -93,6 +97,33 @@ public class IdleTimeoutTest extends BrokerAdminUsingTestBase
             assertTrue(elapsed >= TimeUnit.MILLISECONDS.toNanos(timeoutMillis),
                     "The broker disconnected an idle TCP peer before its AMQP Close response was due");
             interaction.consumeResponse(ChannelClosedResponse.class);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void completedCloseExchangeShutsDownTcp(final boolean brokerInitiated) throws Exception
+    {
+        final BrokerAdmin admin = getBrokerAdmin();
+        assumeTrue(!brokerInitiated || admin.isConnectionManagementSupported());
+        final String containerId = getFullTestName();
+        try (final FrameTransport transport = new FrameTransport(admin).connect())
+        {
+            final Interaction interaction = transport.newInteraction().openContainerId(containerId).negotiateOpen();
+            if (brokerInitiated)
+            {
+                admin.closeConnectionAsync(containerId);
+                interaction.consumeResponse(Close.class).close().sync();
+            }
+            else
+            {
+                interaction.close().consumeResponse(Close.class);
+            }
+
+            // Observe EOF before either the broker's read-idle timer or the shared close deadline can expire.
+            assertTimeoutPreemptively(Duration.ofMillis(IDLE_TIMEOUT_MS),
+                    () -> interaction.consumeResponse(ChannelClosedResponse.class),
+                    "Broker did not close TCP promptly after the AMQP Close exchange");
         }
     }
 
