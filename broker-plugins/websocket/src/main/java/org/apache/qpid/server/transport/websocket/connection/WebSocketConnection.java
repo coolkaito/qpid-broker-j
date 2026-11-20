@@ -43,6 +43,7 @@ import org.apache.qpid.server.transport.MultiVersionProtocolEngine;
 import org.apache.qpid.server.transport.SchedulingDelayNotificationListener;
 import org.apache.qpid.server.transport.ServerNetworkConnection;
 import org.apache.qpid.server.transport.network.Ticker;
+import org.apache.qpid.server.transport.websocket.connection.WebSocketServerConnector.WebSocketEndPoint;
 
 class WebSocketConnection implements ServerNetworkConnection, ByteBufferSender
 {
@@ -61,6 +62,7 @@ class WebSocketConnection implements ServerNetworkConnection, ByteBufferSender
     private static final long FORCE_CLOSE_RETRY_DELAY_NANOS = TimeUnit.SECONDS.toNanos(1L);
 
     private final Session _connection;
+    private final WebSocketEndPoint _tcpEndPoint;
     private final SocketAddress _localAddress;
     private final SocketAddress _remoteAddress;
     private final ReentrantLock _protocolLock = new ReentrantLock();
@@ -80,12 +82,14 @@ class WebSocketConnection implements ServerNetworkConnection, ByteBufferSender
     private long _lastForceCloseAttemptTimeNanos;
     private int _closeStatusCode = StatusCode.NORMAL;
     private boolean _forceCloseAttempted;
+    private boolean _socketClosed;
     private boolean _forceCloseFailureReported;
     private boolean _closeWasExpected;
     private Callback _peerCloseCallback;
     private volatile WebSocketConnectionState _webSocketConnectionState = WebSocketConnectionState.OPEN;
 
     WebSocketConnection(final Session connection,
+                        final WebSocketEndPoint tcpEndPoint,
                         final SocketAddress localAddress,
                         final SocketAddress remoteAddress,
                         final MultiVersionProtocolEngine protocolEngine,
@@ -95,6 +99,7 @@ class WebSocketConnection implements ServerNetworkConnection, ByteBufferSender
     {
         Objects.requireNonNull(settings, "WebSocket settings must not be null");
         _connection = connection;
+        _tcpEndPoint = tcpEndPoint;
         _localAddress = localAddress;
         _remoteAddress = remoteAddress;
         _protocolEngine = protocolEngine;
@@ -546,7 +551,30 @@ class WebSocketConnection implements ServerNetworkConnection, ByteBufferSender
 
         try
         {
-            _connection.disconnect();
+            _tcpEndPoint.closeSocket();
+        }
+        catch (final RuntimeException e)
+        {
+            reportForceCloseFailure(e);
+            return FORCE_CLOSE_RETRY_DELAY_NANOS;
+        }
+
+        synchronized (_writeQueue)
+        {
+            _socketClosed = true;
+            if (!isClosed())
+            {
+                _cleanupJob.requestEndPointClose();
+            }
+        }
+        return Long.MAX_VALUE;
+    }
+
+    void closeEndPoint()
+    {
+        try
+        {
+            _tcpEndPoint.close();
         }
         catch (final RuntimeException e)
         {
@@ -556,16 +584,11 @@ class WebSocketConnection implements ServerNetworkConnection, ByteBufferSender
         {
             completeCloseWrite();
         }
-
-        synchronized (_writeQueue)
-        {
-            return isClosed() ? Long.MAX_VALUE : FORCE_CLOSE_RETRY_DELAY_NANOS;
-        }
     }
 
     private long getForceCloseDelay(final long currentNanoTime)
     {
-        if (isOpen() || isClosed())
+        if (isOpen() || isClosed() || _socketClosed)
         {
             return Long.MAX_VALUE;
         }

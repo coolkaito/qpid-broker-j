@@ -157,6 +157,11 @@ public class WebSocketFrameTransport extends FrameTransport
         return _webSocketClientHandler.sendWebSocketCloseResponse();
     }
 
+    ChannelFuture getChannelCloseFuture()
+    {
+        return _webSocketClientHandler.getChannelCloseFuture();
+    }
+
     int getWebSocketCloseStatusCode()
     {
         return _webSocketClientHandler.getWebSocketCloseStatusCode();
@@ -325,6 +330,11 @@ public class WebSocketFrameTransport extends FrameTransport
                     : new CloseWebSocketFrame(statusCode, ""));
         }
 
+        ChannelFuture getChannelCloseFuture()
+        {
+            return _channel.closeFuture();
+        }
+
         int getWebSocketCloseStatusCode()
         {
             return _webSocketCloseStatusCode;
@@ -335,12 +345,7 @@ public class WebSocketFrameTransport extends FrameTransport
         {
             _handshakeFuture = ctx.newPromise();
             _channel = ctx.channel();
-            if (_withholdWebSocketCloseResponse)
-            {
-                // Keep the client output open when the broker closes its output. Otherwise Netty completes the TCP
-                // shutdown on behalf of the test peer and accidentally satisfies the server-side closing handshake
-                _channel.config().setOption(ChannelOption.ALLOW_HALF_CLOSURE, true);
-            }
+            _channel.config().setOption(ChannelOption.ALLOW_HALF_CLOSURE, false);
         }
 
         @Override

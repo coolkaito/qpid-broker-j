@@ -147,7 +147,7 @@ class WriteJobTest extends WebSocketTestBase
         verify(first).dispose();
         verify(second).dispose();
         verify(session, never()).sendBinary(any(ByteBuffer.class), any(Callback.class));
-        verify(session).disconnect();
+        verify(endPointFor(session)).closeSocket();
     }
 
     @Test
@@ -223,8 +223,8 @@ class WriteJobTest extends WebSocketTestBase
 
         assertTrue(connection.isForceClosing());
         assertEquals(0, _threadPool.getQueueSize());
-        assertEquals(1_000L, scheduleDueConnections());
-        verify(session).disconnect();
+        assertEquals(Long.MAX_VALUE, scheduleDueConnections());
+        verify(endPointFor(session)).closeSocket();
     }
 
     @Test

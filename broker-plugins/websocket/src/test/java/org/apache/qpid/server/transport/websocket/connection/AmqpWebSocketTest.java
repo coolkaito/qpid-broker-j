@@ -47,7 +47,6 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.classic.spi.ThrowableProxy;
 import ch.qos.logback.core.read.ListAppender;
-import org.eclipse.jetty.io.EndPoint;
 import org.eclipse.jetty.util.Callback;
 import org.eclipse.jetty.util.thread.ThreadPool;
 import org.eclipse.jetty.websocket.api.WebSocketContainer;
@@ -69,6 +68,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.qpid.server.bytebuffer.QpidByteBuffer;
 import org.apache.qpid.server.transport.MultiVersionProtocolEngine;
 import org.apache.qpid.server.transport.MultiVersionProtocolEngineFactory;
+import org.apache.qpid.server.transport.websocket.connection.WebSocketServerConnector.WebSocketEndPoint;
 import org.apache.qpid.test.utils.UnitTestBase;
 
 class AmqpWebSocketTest extends UnitTestBase
@@ -102,7 +102,7 @@ class AmqpWebSocketTest extends UnitTestBase
                 handlerFactory.getMetadata(_endpoint.getClass()));
         _coreSession = mock();
         _transportConnection = mock();
-        final EndPoint transport = mock();
+        final WebSocketEndPoint transport = mock();
         when(transport.isOpen()).thenReturn(true);
         when(_transportConnection.getEndPoint()).thenReturn(transport);
         when(_coreSession.getConnection()).thenReturn(_transportConnection);

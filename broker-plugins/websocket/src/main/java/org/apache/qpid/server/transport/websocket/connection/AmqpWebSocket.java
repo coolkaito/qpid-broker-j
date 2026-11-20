@@ -28,6 +28,7 @@ import java.time.Duration;
 import java.util.Objects;
 
 import org.eclipse.jetty.io.Connection;
+import org.eclipse.jetty.io.EndPoint;
 import org.eclipse.jetty.util.thread.ThreadPool;
 import org.eclipse.jetty.websocket.api.Callback;
 import org.eclipse.jetty.websocket.api.Session;
@@ -44,6 +45,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.qpid.server.transport.MultiVersionProtocolEngine;
 import org.apache.qpid.server.transport.MultiVersionProtocolEngineFactory;
+import org.apache.qpid.server.transport.websocket.connection.WebSocketServerConnector.WebSocketEndPoint;
 
 @WebSocket
 public final class AmqpWebSocket implements Connection.Listener
@@ -86,8 +88,12 @@ public final class AmqpWebSocket implements Connection.Listener
         // below, so peer activity cannot postpone transport teardown.
         session.setIdleTimeout(Duration.ZERO);
 
-        _connection = new WebSocketConnection(session, localAddress, remoteAddress, _protocolEngine,
-                 _threadPool, _connectionScheduler, _settings);
+        final WebSocketCoreSession coreSession = (WebSocketCoreSession) ((WebSocketSession) session).getCoreSession();
+        final Connection transport = coreSession.getConnection();
+        final EndPoint endPoint = transport.getEndPoint();
+        final EndPoint tcpEndPoint = endPoint instanceof EndPoint.Wrapper wrapper ? wrapper.unwrap() : endPoint;
+        _connection = new WebSocketConnection(session, (WebSocketEndPoint) tcpEndPoint, localAddress, remoteAddress,
+                                              _protocolEngine, _threadPool, _connectionScheduler, _settings);
 
         if (_certificates != null && _certificates.length > 0)
         {
@@ -97,10 +103,8 @@ public final class AmqpWebSocket implements Connection.Listener
         _protocolEngine.setWorkListener(object -> _connection.scheduleWork());
         _connectionScheduler.registerConnection(_connection);
 
-        final WebSocketCoreSession coreSession = (WebSocketCoreSession) ((WebSocketSession) session).getCoreSession();
-        final Connection transport = coreSession.getConnection();
         transport.addEventListener(this);
-        if (!transport.getEndPoint().isOpen())
+        if (!endPoint.isOpen())
         {
             onClosed(transport);
         }

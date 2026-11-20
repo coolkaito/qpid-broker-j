@@ -45,7 +45,6 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.Appender;
 import org.eclipse.jetty.io.ByteBufferPool;
-import org.eclipse.jetty.io.EndPoint;
 import org.eclipse.jetty.util.Callback;
 import org.eclipse.jetty.util.thread.Scheduler;
 import org.eclipse.jetty.websocket.api.WebSocketContainer;
@@ -73,6 +72,7 @@ import org.apache.qpid.server.transport.AggregateTicker;
 import org.apache.qpid.server.transport.MultiVersionProtocolEngine;
 import org.apache.qpid.server.transport.MultiVersionProtocolEngineFactory;
 import org.apache.qpid.server.transport.ServerNetworkConnection;
+import org.apache.qpid.server.transport.websocket.connection.WebSocketServerConnector.WebSocketEndPoint;
 
 class WebSocketTransportCloseTest extends WebSocketTestBase
 {
@@ -81,7 +81,7 @@ class WebSocketTransportCloseTest extends WebSocketTestBase
     private MultiVersionProtocolEngine _protocolEngine;
     private WebSocketComponents _components;
     private WebSocketCoreSession _coreSession;
-    private EndPoint _transport;
+    private WebSocketEndPoint _transport;
     private org.eclipse.jetty.websocket.core.WebSocketConnection _jettyConnection;
     private WebSocketConnection _connection;
     private Callback _pendingWrite;
@@ -314,10 +314,11 @@ class WebSocketTransportCloseTest extends WebSocketTestBase
         {
             deadline.setTimeToNextTick(0);
             scheduleDueConnections();
+            verify(_transport).closeSocket();
         }
-        assertFalse(_transport.isOpen());
         scheduleDueConnections();
         _threadPool.runAll();
+        assertFalse(_transport.isOpen());
         verify(_protocolEngine).closed();
     }
 
@@ -353,8 +354,8 @@ class WebSocketTransportCloseTest extends WebSocketTestBase
             case TIMED_OUT -> deadline.setTimeToNextTick(0);
         }
         scheduleDueConnections();
-        assertFalse(_transport.isOpen());
         _threadPool.runAll();
+        assertFalse(_transport.isOpen());
         assertTrue(_connection.isClosed());
         verify(peerCloseComplete).run();
         verify(_protocolEngine).closed();

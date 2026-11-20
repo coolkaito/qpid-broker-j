@@ -77,12 +77,13 @@ public class WebSocketCloseHandshakeTest extends WebSocketCloseTestBase
                         "Broker did not send WebSocket Close within the shared close budget");
                 assertEquals(1000, transport.getWebSocketCloseStatusCode(),
                         "Expected normal status after the AMQP Close exchange completed");
-                assertTrue(transport.isChannelOutputOpen(), "Test peer closed TCP before sending WebSocket Close");
                 assertThrows(TimeoutException.class, () -> closeFuture.get(100L, TimeUnit.MILLISECONDS),
                         "Broker completed transport closure before the peer sent WebSocket Close");
+                assertTrue(transport.isChannelOutputOpen(), "TCP closed before the peer could send WebSocket Close");
 
                 transport.sendWebSocketCloseResponse().sync();
 
+                transport.getChannelCloseFuture().get(AWAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 closeFuture.get(AWAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 assertFalse(getBrokerAdmin().isConnectionRegistered(containerId),
                         "Connection remained registered after both closing handshakes completed");

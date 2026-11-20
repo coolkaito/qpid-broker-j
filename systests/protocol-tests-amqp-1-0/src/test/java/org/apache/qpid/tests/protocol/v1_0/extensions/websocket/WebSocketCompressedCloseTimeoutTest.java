@@ -125,8 +125,7 @@ public class WebSocketCompressedCloseTimeoutTest extends BrokerAdminUsingTestBas
                 // Omit the peer's AMQP CLOSE response; expiry must force transport closure.
                 closeFuture.get();
 
-                assertTrue(transport.isChannelOutputOpen(),
-                        "Test peer terminated TCP instead of preserving the writable half");
+                transport.getChannelCloseFuture().sync();
                 assertFalse(getBrokerAdmin().isConnectionRegistered(containerId),
                         "Connection remained registered after the shared close deadline expired");
             }, "Broker did not complete close within the shared deadline and scheduling allowance");

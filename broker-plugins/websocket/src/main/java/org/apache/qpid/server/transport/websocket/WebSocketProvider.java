@@ -56,6 +56,7 @@ import org.apache.qpid.server.transport.AcceptingTransport;
 import org.apache.qpid.server.transport.MultiVersionProtocolEngineFactory;
 import org.apache.qpid.server.transport.websocket.connection.AmqpWebSocket;
 import org.apache.qpid.server.transport.websocket.connection.WebSocketConnectionScheduler;
+import org.apache.qpid.server.transport.websocket.connection.WebSocketServerConnector;
 import org.apache.qpid.server.transport.websocket.connection.WebSocketSettings;
 import org.apache.qpid.server.util.ServerScopedRuntimeException;
 
@@ -149,14 +150,14 @@ class WebSocketProvider implements AcceptingTransport
 
         if (_transport == Transport.WS)
         {
-            connector = new ServerConnector(_server, httpConnectionFactory);
+            connector = new WebSocketServerConnector(_server, httpConnectionFactory);
         }
         else if (_transport == Transport.WSS)
         {
             httpConnectionFactory.getHttpConfiguration().addCustomizer(new SecureRequestCustomizer());
             final WebSocketSslConnectionFactory sslConnectionFactory =
                     new WebSocketSslConnectionFactory(_sslContextFactory, httpConnectionFactory.getProtocol());
-            connector = new ServerConnector(_server, sslConnectionFactory, httpConnectionFactory);
+            connector = new WebSocketServerConnector(_server, sslConnectionFactory, httpConnectionFactory);
             connector.addBean(new SslHandshakeListener()
             {
                 @Override

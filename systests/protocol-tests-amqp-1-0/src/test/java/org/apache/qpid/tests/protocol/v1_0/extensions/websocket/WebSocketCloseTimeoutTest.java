@@ -71,11 +71,13 @@ public class WebSocketCloseTimeoutTest extends WebSocketCloseTestBase
             assertTrue(getBrokerAdmin().isConnectionRegistered(containerId),
                     "Connection was not registered after the AMQP open");
 
+            final CompletableFuture<Long> tcpClosedAt = new CompletableFuture<>();
+            transport.getChannelCloseFuture().addListener(future -> tcpClosedAt.complete(System.currentTimeMillis()));
             assertTimeoutPreemptively(CLOSE_COMPLETION_TIMEOUT, () ->
             {
-                final long closeRequested = System.nanoTime();
+                final long closeRequested = System.currentTimeMillis();
                 final CompletableFuture<Long> closedAt = getBrokerAdmin().closeConnectionAsync(containerId)
-                        .thenApply(ignored -> System.nanoTime());
+                        .thenApply(ignored -> System.currentTimeMillis());
                 interaction.consumeResponse(Close.class);
                 // A one-second heartbeat gives the broker a two-second read-idle timeout.
                 assertFalse(transport.awaitWebSocketCloseFrame(PEER_REPLY_DELAY.toMillis(), TimeUnit.MILLISECONDS),
@@ -88,14 +90,10 @@ public class WebSocketCloseTimeoutTest extends WebSocketCloseTestBase
                             "Broker did not send WebSocket Close after the AMQP Close response");
                 }
 
-                assertTrue(closedAt.get() - closeRequested >= CLOSE_RESPONSE_TIMEOUT.toNanos(),
+                assertTrue(closedAt.get() - closeRequested >= CLOSE_RESPONSE_TIMEOUT.toMillis(),
                         "Broker disconnected before the shared close deadline");
-
-                if (transportType == Transport.WS)
-                {
-                    assertTrue(transport.isChannelOutputOpen(),
-                            "Test peer terminated TCP instead of preserving the writable half");
-                }
+                assertTrue(tcpClosedAt.get() - closeRequested >= CLOSE_RESPONSE_TIMEOUT.toMillis(),
+                        "TCP closed before the shared close deadline");
                 assertFalse(getBrokerAdmin().isConnectionRegistered(containerId),
                         "Connection remained registered after the shared close deadline expired");
                 if (!respondToAmqpClose)

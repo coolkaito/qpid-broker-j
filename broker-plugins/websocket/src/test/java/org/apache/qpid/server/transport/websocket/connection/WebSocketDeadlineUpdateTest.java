@@ -376,7 +376,7 @@ class WebSocketDeadlineUpdateTest extends WebSocketTestBase
             connection.webSocketClosed(closeTask);
             disconnected.countDown();
             return null;
-        }).when(session).disconnect();
+        }).when(endPointFor(session)).closeSocket();
         startScheduler();
         _observedScheduler.awaitWait(timeoutMillis -> timeoutMillis == 0L);
 
@@ -399,7 +399,7 @@ class WebSocketDeadlineUpdateTest extends WebSocketTestBase
         connection.close();
         _connectionScheduler.registerConnection(connection);
         _observedScheduler.awaitWait(timeoutMillis -> timeoutMillis == 1_000L);
-        verify(session, never()).disconnect();
+        verify(endPointFor(session), never()).closeSocket();
         verify(session, never()).close(anyInt(), isNull(), any(Callback.class));
         verify(duplicate, never()).dispose();
 
@@ -417,7 +417,7 @@ class WebSocketDeadlineUpdateTest extends WebSocketTestBase
         _threadPool.runAll();
         verify(session).sendBinary(any(ByteBuffer.class), any(Callback.class));
         verify(session, never()).close(anyInt(), isNull(), any(Callback.class));
-        verify(session).disconnect();
+        verify(endPointFor(session)).closeSocket();
         verify(duplicate).dispose();
         verify(closeTask).run();
         assertEquals(0, _threadPool.getQueueSize());
@@ -522,7 +522,7 @@ class WebSocketDeadlineUpdateTest extends WebSocketTestBase
             repeat.set(false);
             disconnected.countDown();
             return null;
-        }).when(session).disconnect();
+        }).when(endPointFor(session)).closeSocket();
         return createConnection(new MutableTicker(FAR_FUTURE_TICK_DELAY_MILLIS), session);
     }
 
