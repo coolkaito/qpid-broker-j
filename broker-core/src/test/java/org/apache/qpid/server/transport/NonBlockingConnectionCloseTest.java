@@ -473,8 +473,32 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
     }
 
     @ParameterizedTest
+    @CsvSource({"NONE, false", "NONE, true", "TLS, false", "TLS, true"})
+    void completedProtocolCloseWaitsForWriteReadiness(final TransportEncryption encryption,
+                                                      final boolean expireWhileWaiting) throws Exception
+    {
+        createConnection(encryption);
+        final AtomicBoolean expired = new AtomicBoolean();
+        installDeadline(expired);
+        completeProtocolCloseDuringRead(this::queueOutput);
+        when(_engine.hasWork()).thenReturn(true);
+
+        assertFalse(_connection.doWork());
+        verify(_socket).write(any(ByteBuffer[].class));
+        assertWaitingForWrite();
+
+        expired.set(expireWhileWaiting);
+        _writable.set(true);
+        assertTrue(_connection.doWork());
+
+        verify(_engine).processPendingIterator();
+        verify(_socket, times(expireWhileWaiting ? 1 : 2)).write(any(ByteBuffer[].class));
+        assertClosedAndReleased();
+    }
+
+    @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void finalTlsAlertRetriesRespectProtocolDeadline(final boolean expireDuringWrite) throws Exception
+    void finalTlsAlertWaitsForWriteReadiness(final boolean expireWhileWaiting) throws Exception
     {
         createConnection(TransportEncryption.TLS);
         final AtomicBoolean expired = new AtomicBoolean();
@@ -482,10 +506,13 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         final AtomicBoolean outboundDone = new AtomicBoolean();
         final AtomicBoolean firstWrite = new AtomicBoolean(true);
         installDeadline(expired);
+        completeProtocolCloseDuringRead(() -> { });
 
+        when(_sslEngine.getHandshakeStatus()).thenReturn(SSLEngineResult.HandshakeStatus.NEED_UNWRAP);
         doAnswer(invocation ->
         {
             closeStarted.set(true);
+            when(_sslEngine.getHandshakeStatus()).thenReturn(SSLEngineResult.HandshakeStatus.NEED_WRAP);
             return null;
         }).when(_sslEngine).closeOutbound();
         when(_sslEngine.isOutboundDone()).thenAnswer(invocation -> outboundDone.get());
@@ -499,6 +526,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
                 assertFalse(outboundDone.get(), "TLS alert must be wrapped once");
                 target.put((byte) 1);
                 outboundDone.set(true);
+                when(_sslEngine.getHandshakeStatus()).thenReturn(SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING);
                 return new SSLEngineResult(SSLEngineResult.Status.CLOSED,
                                            SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING, 0, 1);
             }
@@ -511,18 +539,44 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
             assertEquals(1, alert.remaining());
             if (firstWrite.getAndSet(false))
             {
-                expired.set(expireDuringWrite);
                 return 0L;
             }
             alert.position(alert.limit());
             return 1L;
         }).when(_socket).write(any(ByteBuffer[].class));
 
-        _connection.close();
+        assertFalse(_connection.doWork());
+        verify(_sslEngine).closeOutbound();
+        verify(_socket, never()).write(any(ByteBuffer[].class));
+        assertWaitingForWrite();
+
+        assertFalse(_connection.doWork());
+        verify(_socket).write(any(ByteBuffer[].class));
+        assertWaitingForWrite();
+
+        expired.set(expireWhileWaiting);
         assertTrue(_connection.doWork());
 
         verify(_sslEngine).closeOutbound();
-        verify(_socket, times(expireDuringWrite ? 1 : 2)).write(any(ByteBuffer[].class));
+        verify(_socket, times(expireWhileWaiting ? 1 : 2)).write(any(ByteBuffer[].class));
+        assertClosedAndReleased();
+    }
+
+    @Test
+    void sharedDeadlineCanWakePendingFinalWrite() throws Exception
+    {
+        createConnection(TransportEncryption.NONE);
+        completeProtocolCloseDuringRead(this::queueOutput);
+        assertFalse(_connection.doWork());
+        assertWaitingForWrite();
+
+        _connection.setCloseDeadline(new ConnectionClosingTicker(0, _connection));
+
+        verify(_selectionTask).wakeup();
+        assertEquals(0, _connection.getTicker().getTimeToNextTick(System.currentTimeMillis()));
+        assertTrue(_connection.doWork());
+
+        verify(_socket).write(any(ByteBuffer[].class));
         assertClosedAndReleased();
     }
 
@@ -688,6 +742,17 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         verify(_socket, never()).close();
     }
 
+    private void completeProtocolCloseDuringRead(final Runnable action) throws Exception
+    {
+        final AtomicBoolean protocolCloseComplete = new AtomicBoolean();
+        when(_engine.isProtocolCloseComplete()).thenAnswer(invocation -> protocolCloseComplete.get());
+        receiveDuringRead(() ->
+        {
+            action.run();
+            protocolCloseComplete.set(true);
+        });
+    }
+
     private void receiveDuringRead(final Runnable action) throws Exception
     {
         // Supply a TLS application-data record; the mocked unwrap below produces one application byte.
@@ -718,6 +783,14 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
             action.run();
             return null;
         }).when(_engine).received(any(QpidByteBuffer.class));
+    }
+
+    private void assertWaitingForWrite()
+    {
+        assertTrue(_connection.wantsWrite(), "Pending final output must request write readiness");
+        assertFalse(_connection.wantsRead(), "Only TLS input can be needed after AMQP Close");
+        assertFalse(_connection.isPartialRead(), "An earlier read must not reschedule a blocked final write");
+        assertFalse(_connection.isStateChanged(), "Protocol notifications must not reschedule a blocked final write");
     }
 
     private void assertNoIoAfterReadClose(final boolean closed)

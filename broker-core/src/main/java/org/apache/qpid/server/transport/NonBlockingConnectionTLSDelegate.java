@@ -197,6 +197,7 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
         {
             _sslEngine.closeOutbound();
             _outboundCloseStarted = true;
+            _needsReadForWrite = _sslEngine.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_UNWRAP;
         }
         return new WriteResult(_sslEngine.isOutboundDone(), result.getBytesConsumed());
     }
