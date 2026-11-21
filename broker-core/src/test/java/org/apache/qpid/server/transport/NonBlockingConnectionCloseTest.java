@@ -583,10 +583,6 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         }
         assertFalse(_connection.doWork());
         verify(_sslEngine).closeOutbound();
-        verify(_socket, never()).write(any(ByteBuffer[].class));
-        assertWaitingForWrite();
-
-        assertFalse(_connection.doWork());
         verify(_socket).write(any(ByteBuffer[].class));
         assertWaitingForWrite();
 

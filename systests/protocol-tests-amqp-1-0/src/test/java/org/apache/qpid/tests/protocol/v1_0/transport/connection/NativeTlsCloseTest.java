@@ -25,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.net.InetSocketAddress;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import io.netty.channel.Channel;
@@ -40,6 +41,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 
 import org.apache.qpid.server.model.Connection;
 import org.apache.qpid.server.model.Transport;
+import org.apache.qpid.server.model.port.AmqpPort;
 import org.apache.qpid.server.protocol.v1_0.type.transport.Close;
 import org.apache.qpid.test.utils.tls.AltNameType;
 import org.apache.qpid.test.utils.tls.AlternativeName;
@@ -62,8 +64,10 @@ public class NativeTlsCloseTest extends BrokerAdminUsingTestBase
     private static final long AWAIT_TIMEOUT_SECONDS = 5L;
 
     @ParameterizedTest
-    @CsvSource({"TLSv1.2, true", "TLSv1.2, false", "TLSv1.3, true", "TLSv1.3, false"})
-    public void peerReceivesTlsCloseNotifyAfterAmqpClose(final String tlsProtocol, final boolean brokerInitiated)
+    @CsvSource({"TLSv1.2, true, false", "TLSv1.2, false, false", "TLSv1.3, true, false", "TLSv1.3, false, false",
+                "TLSv1.2, true, true", "TLSv1.2, false, true", "TLSv1.3, true, true", "TLSv1.3, false, true"})
+    public void peerReceivesTlsCloseNotifyAfterAmqpClose(final String tlsProtocol, final boolean brokerInitiated,
+                                                       final boolean zeroFinalWriteTimeout)
             throws Exception
     {
         final BrokerAdmin brokerAdmin = getBrokerAdmin();
@@ -77,8 +81,10 @@ public class NativeTlsCloseTest extends BrokerAdminUsingTestBase
         {
             final String portName = "SSL-" + server.certificate().getSerialNumber().toString(16);
             final String keyStore = tls.createKeyStoreAsDataUrl(new PrivateKeyEntry(tls.getPrivateKeyAlias(), server));
+            final Map<String, String> portContext =
+                    zeroFinalWriteTimeout ? Map.of(AmqpPort.FINAL_WRITE_TIMEOUT, "0") : Map.of();
             final InetSocketAddress address =
-                    admin.createTlsAmqpPort(Transport.SSL, portName, keyStore, tls.getSecret());
+                    admin.createTlsAmqpPort(Transport.SSL, portName, keyStore, tls.getSecret(), portContext);
             final SslContext client = SslContextBuilder.forClient().sslProvider(SslProvider.JDK)
                     .trustManager(server.certificate()).protocols(tlsProtocol).endpointIdentificationAlgorithm("HTTPS")
                     .build();

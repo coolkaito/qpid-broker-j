@@ -193,13 +193,16 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
             return result;
         }
 
-        if (!_outboundCloseStarted)
+        if (_outboundCloseStarted)
         {
-            _sslEngine.closeOutbound();
-            _outboundCloseStarted = true;
-            _needsReadForWrite = _sslEngine.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_UNWRAP;
+            return new WriteResult(false, result.getBytesConsumed());
         }
-        return new WriteResult(_sslEngine.isOutboundDone(), result.getBytesConsumed());
+
+        _sslEngine.closeOutbound();
+        _outboundCloseStarted = true;
+        // Include the alert in the first final write pass when application data has drained.
+        final WriteResult alert = doWrite(Collections.emptyList(), true);
+        return new WriteResult(alert.isComplete() && _sslEngine.isOutboundDone(), result.getBytesConsumed());
     }
 
     private WriteResult doWrite(final Collection<QpidByteBuffer> buffers, final boolean finalWrite) throws IOException

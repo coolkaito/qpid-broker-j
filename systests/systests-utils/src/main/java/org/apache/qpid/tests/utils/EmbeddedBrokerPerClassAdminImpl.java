@@ -258,6 +258,13 @@ public class EmbeddedBrokerPerClassAdminImpl implements BrokerAdmin
     public InetSocketAddress createTlsAmqpPort(final Transport transport, final String name,
                                                final String keyStoreUrl, final String password)
     {
+        return createTlsAmqpPort(transport, name, keyStoreUrl, password, Map.of());
+    }
+
+    public InetSocketAddress createTlsAmqpPort(final Transport transport, final String name,
+                                               final String keyStoreUrl, final String password,
+                                               final Map<String, String> context)
+    {
         final Subject subject = new Subject(true, Set.of(_systemLauncher.getSystemPrincipal(),
                 new TaskPrincipal("createTlsAmqpPort")), Set.of(), Set.of());
         return SubjectExecutionContext.withSubjectUnchecked(subject, () ->
@@ -270,7 +277,8 @@ public class EmbeddedBrokerPerClassAdminImpl implements BrokerAdmin
             final Port<?> port = _broker.createChild(Port.class, Map.of(Port.NAME, name, Port.TYPE, "AMQP",
                     Port.BINDING_ADDRESS, "localhost", Port.PORT, 0, Port.TRANSPORTS, Set.of(transport),
                     Port.PROTOCOLS, Set.of(Protocol.AMQP_1_0), Port.KEY_STORE, keyStore.getName(),
-                    Port.AUTHENTICATION_PROVIDER, plainPort.getAuthenticationProvider().getName()));
+                    Port.AUTHENTICATION_PROVIDER, plainPort.getAuthenticationProvider().getName(),
+                    Port.CONTEXT, context));
             return new InetSocketAddress("localhost", port.getBoundPort());
         });
     }
