@@ -26,8 +26,10 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -99,6 +101,7 @@ class WebSocketTransportCloseTest extends WebSocketTestBase
         _pendingWrite = null;
         _protocolEngine = mock();
         when(_protocolEngine.getAggregateTicker()).thenReturn(new AggregateTicker());
+        _connectionScheduler = spy(_connectionScheduler);
         final MultiVersionProtocolEngineFactory factory = mock();
         when(factory.newProtocolEngine(any(SocketAddress.class))).thenReturn(_protocolEngine);
         final AmqpWebSocket endpoint = new AmqpWebSocket(factory, _threadPool, _connectionScheduler, SETTINGS, null);
@@ -228,6 +231,39 @@ class WebSocketTransportCloseTest extends WebSocketTestBase
         _threadPool.runAll();
         verify(_protocolEngine).closed();
         assertEquals(Long.MAX_VALUE, scheduleDueConnections());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void incomingCloseGetsFirstWriteAtZeroTimeout(final boolean sharedDeadlineExpires)
+    {
+        final MutableTicker deadline = new MutableTicker(500);
+        _connection.setCloseDeadline(deadline);
+        doReturn(0L).when(_connectionScheduler).getCloseTimeoutNanos();
+        final AtomicBoolean scanBeforeReply = new AtomicBoolean(true);
+        doAnswer(invocation ->
+        {
+            if (scanBeforeReply.getAndSet(false))
+            {
+                verify(_transport, never()).write(any(Callback.class), any(ByteBuffer[].class));
+                if (sharedDeadlineExpires)
+                {
+                    deadline.setTimeToNextTick(0);
+                }
+                scheduleDueConnections();
+                verify(_transport, times(sharedDeadlineExpires ? 1 : 0)).closeSocket();
+            }
+            return invocation.callRealMethod();
+        }).when(_connectionScheduler).wakeup();
+
+        receiveClose();
+
+        verify(_transport, times(sharedDeadlineExpires ? 0 : 1)).write(any(Callback.class), any(ByteBuffer[].class));
+        scheduleDueConnections();
+        verify(_transport).closeSocket();
+        _threadPool.runAll();
+        assertTrue(_connection.isClosed());
+        verify(_protocolEngine).closed();
     }
 
     @Test

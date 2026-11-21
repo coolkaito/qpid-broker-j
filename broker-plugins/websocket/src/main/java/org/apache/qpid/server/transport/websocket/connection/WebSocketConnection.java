@@ -85,6 +85,7 @@ class WebSocketConnection implements ServerNetworkConnection, ByteBufferSender
     private boolean _socketClosed;
     private boolean _forceCloseFailureReported;
     private boolean _closeWasExpected;
+    private boolean _peerCloseReplyPending;
     private Callback _peerCloseCallback;
     private volatile WebSocketConnectionState _webSocketConnectionState = WebSocketConnectionState.OPEN;
 
@@ -468,6 +469,7 @@ class WebSocketConnection implements ServerNetworkConnection, ByteBufferSender
     void webSocketCloseReceived(final Callback callback)
     {
         boolean deferCallback = false;
+        boolean allowImmediateReply = false;
         synchronized (_writeQueue)
         {
             if (!isClosed() && !isForceClosing() &&
@@ -482,14 +484,42 @@ class WebSocketConnection implements ServerNetworkConnection, ByteBufferSender
                     _peerCloseCallback = callback;
                     deferCallback = true;
                 }
+                else if (_scheduler.getCloseTimeoutNanos() == 0L &&
+                        (isOpen() || _webSocketConnectionState == WebSocketConnectionState.CLOSE_REQUESTED))
+                {
+                    _peerCloseReplyPending = true;
+                    allowImmediateReply = true;
+                }
                 _webSocketConnectionState = WebSocketConnectionState.CLOSE_RECEIVED;
                 _writeJob.discardPendingWrites();
             }
         }
-        _scheduler.wakeup();
-        if (!deferCallback)
+        try
         {
-            callback.succeed();
+            _scheduler.wakeup();
+            if (deferCallback)
+            {
+                return;
+            }
+            if (allowImmediateReply && (requestForceCloseIfDeadlineExpired() || isForceClosing() || isClosed()))
+            {
+                callback.fail(new ClosedChannelException());
+            }
+            else
+            {
+                callback.succeed();
+            }
+        }
+        finally
+        {
+            if (allowImmediateReply)
+            {
+                synchronized (_writeQueue)
+                {
+                    _peerCloseReplyPending = false;
+                }
+                _scheduler.wakeup();
+            }
         }
     }
 
@@ -613,7 +643,7 @@ class WebSocketConnection implements ServerNetworkConnection, ByteBufferSender
     {
         final long deadlineRemaining = TimeUnit.MILLISECONDS
                 .toNanos(getTimeToCloseDeadline(_scheduler.getCurrentTime()));
-        if (isOpen())
+        if (isOpen() || _peerCloseReplyPending)
         {
             return deadlineRemaining;
         }
