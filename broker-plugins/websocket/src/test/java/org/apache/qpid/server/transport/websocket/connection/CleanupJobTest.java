@@ -505,6 +505,32 @@ class CleanupJobTest extends WebSocketTestBase
     }
 
     @Test
+    void endpointCloseRequestedDuringSchedulerShutdownCompletesCleanup()
+    {
+        final Session session = mock();
+        final WebSocketConnection connection = createConnection(new MutableTicker(37_000), session);
+        final WebSocketEndPoint endPoint = endPointFor(session);
+        final Runnable closeTask = mock();
+        doAnswer(invocation -> connection.webSocketClosed(closeTask)).when(endPoint).close();
+        doAnswer(invocation ->
+        {
+            _threadPool.rejectNext();
+            _connectionScheduler.shutdown();
+            return null;
+        }).when(endPoint).closeSocket();
+
+        _connectionScheduler.registerConnection(connection);
+        connection.abort();
+        scheduleDueConnections();
+
+        assertTrue(connection.isClosed());
+        verify(endPoint).closeSocket();
+        verify(endPoint).close();
+        verify(closeTask).run();
+        assertEquals(0, _threadPool.getQueueSize());
+    }
+
+    @Test
     void closeAfterSchedulerShutdownCompletesCleanup()
     {
         final WebSocketConnection connection = createConnection(new MutableTicker(37_000));

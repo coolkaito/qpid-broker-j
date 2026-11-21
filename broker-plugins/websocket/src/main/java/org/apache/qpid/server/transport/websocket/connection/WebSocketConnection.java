@@ -567,6 +567,10 @@ class WebSocketConnection implements ServerNetworkConnection, ByteBufferSender
                 _cleanupJob.requestEndPointClose();
             }
         }
+        if (_scheduler.isShutdown())
+        {
+            cleanupAfterShutdown();
+        }
         return Long.MAX_VALUE;
     }
 
