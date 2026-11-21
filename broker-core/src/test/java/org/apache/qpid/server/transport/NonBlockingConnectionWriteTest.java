@@ -425,7 +425,6 @@ class NonBlockingConnectionWriteTest extends UnitTestBase
     void pendingTlsWrapDoesNotSelectForReading() throws Exception
     {
         final NonBlockingConnectionDelegate delegate = mock(NonBlockingConnectionDelegate.class);
-        when(delegate.doFinalWrite(any())).thenCallRealMethod();
         when(delegate.readyForRead()).thenReturn(false);
         when(delegate.doWrite(any())).thenReturn(new NonBlockingConnectionDelegate.WriteResult(false, 0));
         final Field field = NonBlockingConnection.class.getDeclaredField("_delegate");
@@ -450,7 +449,6 @@ class NonBlockingConnectionWriteTest extends UnitTestBase
         final AtomicBoolean inputProcessed = new AtomicBoolean();
         final AtomicInteger completed = new AtomicInteger();
         final NonBlockingConnectionDelegate delegate = mock(NonBlockingConnectionDelegate.class);
-        when(delegate.doFinalWrite(any())).thenCallRealMethod();
         when(delegate.needsReadForWrite()).thenAnswer(invocation -> !inputProcessed.get());
         when(delegate.readyForRead()).thenReturn(true);
         when(delegate.processData()).thenAnswer(invocation ->

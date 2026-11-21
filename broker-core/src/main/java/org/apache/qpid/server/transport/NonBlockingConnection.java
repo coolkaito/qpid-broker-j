@@ -61,6 +61,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
 
     private final String _remoteSocketAddress;
     private final AtomicBoolean _closed = new AtomicBoolean(false);
+    private final AtomicBoolean _tlsCloseRequested = new AtomicBoolean();
     private final ProtocolEngine _protocolEngine;
     private final Runnable _onTransportEncryptionAction;
     private final int _finalWriteThreshold;
@@ -182,11 +183,32 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
     public void abort()
     {
         _aborted = true;
-        close();
+        finishClose();
     }
 
     @Override
     public void close()
+    {
+        if (_delegate instanceof NonBlockingConnectionTLSDelegate)
+        {
+            if (!isClosing() && _tlsCloseRequested.compareAndSet(false, true))
+            {
+                _protocolEngine.notifyWork();
+                _selectionTask.wakeup();
+            }
+        }
+        else
+        {
+            finishClose();
+        }
+    }
+
+    private boolean isClosing()
+    {
+        return _closed.get() || _tlsCloseRequested.get() || _finalWriteTicker != null;
+    }
+
+    private void finishClose()
     {
         LOGGER.debug("Closing " + _remoteSocketAddress);
         if(_closed.compareAndSet(false,true))
@@ -263,7 +285,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
 
     public boolean isStateChanged()
     {
-        return _finalWriteTicker == null ? _protocolEngine.hasWork() : _closed.get();
+        return _finalWriteTicker == null ? _tlsCloseRequested.get() || _protocolEngine.hasWork() : _closed.get();
     }
 
     public void doPreWork()
@@ -290,11 +312,14 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
         {
             try
             {
-                final long currentTime = System.currentTimeMillis();
-                final int tick = getTicker().getTimeToNextTick(currentTime);
-                if (tick <= 0)
+                if (_finalWriteTicker != null || !_tlsCloseRequested.get())
                 {
-                    getTicker().tick(currentTime);
+                    final long currentTime = System.currentTimeMillis();
+                    final AggregateTicker ticker = getTicker();
+                    if (ticker.getTimeToNextTick(currentTime) <= 0)
+                    {
+                        ticker.tick(currentTime);
+                    }
                 }
                 _scheduledTime = 0L;
 
@@ -303,7 +328,14 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
                     _protocolEngine.setIOThread(Thread.currentThread());
                     if (_finalWriteTicker == null)
                     {
-                        doProtocolWork();
+                        if (!_tlsCloseRequested.get())
+                        {
+                            doProtocolWork();
+                        }
+                        if (_tlsCloseRequested.get() && !_closed.get() && _finalWriteTicker == null)
+                        {
+                            startFinalWrite();
+                        }
                     }
                     else if (!checkForWriteAbort())
                     {
@@ -370,7 +402,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
         {
             abort();
         }
-        if (_closed.get())
+        if (isClosing())
         {
             return;
         }
@@ -387,14 +419,13 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
             {
                 abort();
             }
-            if (_closed.get())
+            if (isClosing())
             {
                 return;
             }
             if (_protocolEngine.isProtocolCloseComplete())
             {
                 startFinalWrite();
-                writeFinalOutput();
                 return;
             }
 
@@ -405,7 +436,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
             }
         }
 
-        if (!_closed.get())
+        if (!isClosing())
         {
             if (!processPendingComplete && (_fullyWritten || getBufferedSize() < _port.getNetworkBufferSize()))
             {
@@ -415,18 +446,27 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
         }
     }
 
-    private synchronized void startFinalWrite()
+    private void startFinalWrite() throws IOException
     {
-        // Keep both close deadlines visible to the selector after protocol work finishes.
+        final Ticker portDeadline = new ConnectionClosingTicker(_finalWriteTimeout, this);
         final AggregateTicker ticker = new AggregateTicker();
-        final Ticker closeDeadline = _closeDeadline;
-        if (closeDeadline != null)
+        synchronized (this)
         {
-            ticker.addTicker(closeDeadline);
+            if (_closeDeadline != null)
+            {
+                ticker.addTicker(_closeDeadline);
+            }
+            _finalWriteTicker = ticker;
         }
-        ticker.addTicker(new ConnectionClosingTicker(_finalWriteTimeout, this));
         _pendingIterator = null;
-        _finalWriteTicker = ticker;
+
+        // Allow the first non-blocking write within the shared AMQP deadline.
+        writeFinalOutput();
+        if (!_closed.get())
+        {
+            ticker.addTicker(portDeadline);
+            checkForWriteAbort();
+        }
     }
 
     private void writeFinalOutput() throws IOException
@@ -434,10 +474,10 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
         _partialRead = false;
         if (!_closed.get() && !checkForWriteAbort())
         {
-            final boolean complete = doFinalWrite();
+            final boolean complete = updateWriteState(_delegate.doFinalWrite(_buffers));
             if (!checkForWriteAbort() && complete)
             {
-                close();
+                finishClose();
             }
         }
     }
@@ -451,7 +491,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
 
         final int networkBufferSize = _port.getNetworkBufferSize();
 
-        while (!_closed.get() && !isCloseDeadlineExpired() && _pendingIterator.hasNext())
+        while (!isClosing() && !isCloseDeadlineExpired() && _pendingIterator.hasNext())
         {
             long size = getBufferedSize();
             if(size >= networkBufferSize)
@@ -470,7 +510,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
             }
         }
 
-        if (_closed.get() || isCloseDeadlineExpired())
+        if (isClosing() || isCloseDeadlineExpired())
         {
             return false;
         }
@@ -550,7 +590,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
         {
             final long startTime = System.currentTimeMillis();
             int cnt = 0;
-            while (!checkForWriteAbort() && !doFinalWrite())
+            while (!checkForWriteAbort() && !doWrite())
             {
                 if (cnt % _finalWriteThreshold == 0 && System.currentTimeMillis() - startTime > _finalWriteTimeout)
                 {
@@ -678,11 +718,6 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
         return updateWriteState(_delegate.doWrite(_buffers));
     }
 
-    private boolean doFinalWrite() throws IOException
-    {
-        return updateWriteState(_delegate.doFinalWrite(_buffers));
-    }
-
     private boolean updateWriteState(final NonBlockingConnectionDelegate.WriteResult result)
     {
         _bufferedSize -= result.getBytesConsumed();
@@ -730,7 +765,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
     public void send(final QpidByteBuffer msg)
     {
 
-        if (_closed.get() || _finalWriteTicker != null)
+        if (isClosing())
         {
             LOGGER.warn("Send ignored as the connection is closing or closed");
         }
@@ -774,7 +809,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
 
     public void processAmqpData(final QpidByteBuffer applicationData)
     {
-        if (_finalWriteTicker == null)
+        if (_finalWriteTicker == null && !_tlsCloseRequested.get())
         {
             _protocolEngine.received(applicationData);
         }

@@ -497,16 +497,47 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void finalTlsAlertWaitsForWriteReadiness(final boolean expireWhileWaiting) throws Exception
+    @CsvSource({"NONE, true, false", "NONE, false, false", "NONE, true, true",
+                "TLS, true, false", "TLS, false, false", "TLS, true, true"})
+    void zeroFinalWriteTimeoutAllowsOneAttemptWithinSharedDeadline(final TransportEncryption encryption,
+                                                                  final boolean writable,
+                                                                  final boolean expireDuringRead) throws Exception
+    {
+        when(_port.getContextValue(Long.class, AmqpPort.FINAL_WRITE_TIMEOUT)).thenReturn(0L);
+        createConnection(encryption);
+        _writable.set(writable);
+        final AtomicBoolean expired = new AtomicBoolean();
+        installDeadline(expired);
+        completeProtocolCloseDuringRead(() ->
+        {
+            queueOutput();
+            expired.set(expireDuringRead);
+        });
+
+        assertTrue(_connection.doWork());
+
+        verify(_socket, times(expireDuringRead ? 0 : 1)).write(any(ByteBuffer[].class));
+        assertClosedAndReleased();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void finalTlsAlertWaitsForWriteReadiness(final boolean directClose, final boolean expireWhileWaiting)
+            throws Exception
     {
         createConnection(TransportEncryption.TLS);
         final AtomicBoolean expired = new AtomicBoolean();
         final AtomicBoolean closeStarted = new AtomicBoolean();
         final AtomicBoolean outboundDone = new AtomicBoolean();
         final AtomicBoolean firstWrite = new AtomicBoolean(true);
-        installDeadline(expired);
-        completeProtocolCloseDuringRead(() -> { });
+        if (!directClose || expireWhileWaiting)
+        {
+            installDeadline(expired);
+        }
+        if (!directClose)
+        {
+            completeProtocolCloseDuringRead(() -> { });
+        }
 
         when(_sslEngine.getHandshakeStatus()).thenReturn(SSLEngineResult.HandshakeStatus.NEED_UNWRAP);
         doAnswer(invocation ->
@@ -545,6 +576,11 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
             return 1L;
         }).when(_socket).write(any(ByteBuffer[].class));
 
+        if (directClose)
+        {
+            _connection.close();
+            assertTrue(_connection.isStateChanged());
+        }
         assertFalse(_connection.doWork());
         verify(_sslEngine).closeOutbound();
         verify(_socket, never()).write(any(ByteBuffer[].class));
@@ -554,6 +590,11 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         verify(_socket).write(any(ByteBuffer[].class));
         assertWaitingForWrite();
 
+        if (directClose)
+        {
+            _connection.close();
+            assertWaitingForWrite();
+        }
         expired.set(expireWhileWaiting);
         assertTrue(_connection.doWork());
 
@@ -713,11 +754,18 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
 
         assertTrue(_connection.doWork());
 
-        verify(_engine).received(any(QpidByteBuffer.class));
-        verify(_socket, atLeastOnce()).write(any(ByteBuffer[].class));
         final InOrder shutdownOrder = inOrder(_engine, _socket);
-        shutdownOrder.verify(_engine).setIOThread(null);
-        shutdownOrder.verify(_socket, atLeastOnce()).write(any(ByteBuffer[].class));
+        shutdownOrder.verify(_engine).received(any(QpidByteBuffer.class));
+        if (encryption == TransportEncryption.TLS)
+        {
+            shutdownOrder.verify(_socket, atLeastOnce()).write(any(ByteBuffer[].class));
+            shutdownOrder.verify(_engine).setIOThread(null);
+        }
+        else
+        {
+            shutdownOrder.verify(_engine).setIOThread(null);
+            shutdownOrder.verify(_socket, atLeastOnce()).write(any(ByteBuffer[].class));
+        }
         verify(_engine, never()).setTransportBlockedForWriting(anyBoolean());
         assertFalse(_connection.wantsWrite(), "Graceful close must drain queued output");
         assertClosedAndReleased();
