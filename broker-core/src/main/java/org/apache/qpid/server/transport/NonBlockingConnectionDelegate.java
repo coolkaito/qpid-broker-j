@@ -52,6 +52,12 @@ interface NonBlockingConnectionDelegate
 
     WriteResult doWrite(Collection<QpidByteBuffer> buffers) throws IOException;
 
+    /** Drain application data and any transport close records before shutting down the socket. */
+    default WriteResult doFinalWrite(final Collection<QpidByteBuffer> buffers) throws IOException
+    {
+        return doWrite(buffers);
+    }
+
     boolean readyForRead();
 
     /** Whether pending output requires peer input before another write can make progress. */

@@ -498,7 +498,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
         {
             final long startTime = System.currentTimeMillis();
             int cnt = 0;
-            while (!checkForWriteAbort() && !doWrite())
+            while (!checkForWriteAbort() && !updateWriteState(_delegate.doFinalWrite(_buffers)))
             {
                 if (cnt % _finalWriteThreshold == 0 && System.currentTimeMillis() - startTime > _finalWriteTimeout)
                 {
@@ -622,7 +622,11 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
 
     private boolean doWrite() throws IOException
     {
-        final NonBlockingConnectionDelegate.WriteResult result = _delegate.doWrite(_buffers);
+        return updateWriteState(_delegate.doWrite(_buffers));
+    }
+
+    private boolean updateWriteState(final NonBlockingConnectionDelegate.WriteResult result)
+    {
         _bufferedSize -= result.getBytesConsumed();
         _fullyWritten = result.isComplete();
         while(!_buffers.isEmpty())

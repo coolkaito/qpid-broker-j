@@ -66,7 +66,7 @@ abstract class WebSocketCloseTestBase extends BrokerAdminUsingTestBase
             final String keyStore = tls.createKeyStoreAsDataUrl(new PrivateKeyEntry(tls.getPrivateKeyAlias(), server));
             final String portName = "WSS-" + server.certificate().getSerialNumber().toString(16);
             final InetSocketAddress address = ((EmbeddedBrokerPerClassAdminImpl) admin)
-                    .createTlsWebSocketPort(portName, keyStore, tls.getSecret());
+                    .createTlsAmqpPort(transportType, portName, keyStore, tls.getSecret());
             final SslContext client = SslContextBuilder.forClient().sslProvider(SslProvider.JDK)
                     .trustManager(server.certificate()).protocols("TLSv1.2").endpointIdentificationAlgorithm("HTTPS")
                     .build();

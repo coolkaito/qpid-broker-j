@@ -61,6 +61,7 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
     private volatile boolean _hostChecked;
     private volatile boolean _needsReadForWrite;
     private boolean _needsMoreNetworkData;
+    private boolean _outboundCloseStarted;
     private QpidByteBuffer _netInputBuffer;
     private QpidByteBuffer _netOutputBuffer;
     private QpidByteBuffer _applicationBuffer;
@@ -180,9 +181,31 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
     @Override
     public WriteResult doWrite(final Collection<QpidByteBuffer> buffers) throws IOException
     {
+        return doWrite(buffers, false);
+    }
+
+    @Override
+    public WriteResult doFinalWrite(final Collection<QpidByteBuffer> buffers) throws IOException
+    {
+        final WriteResult result = doWrite(buffers, true);
+        if (!result.isComplete() || _sslEngine.isOutboundDone() || _parent.checkForWriteAbort())
+        {
+            return result;
+        }
+
+        if (!_outboundCloseStarted)
+        {
+            _sslEngine.closeOutbound();
+            _outboundCloseStarted = true;
+        }
+        return new WriteResult(_sslEngine.isOutboundDone(), result.getBytesConsumed());
+    }
+
+    private WriteResult doWrite(final Collection<QpidByteBuffer> buffers, final boolean finalWrite) throws IOException
+    {
         final int bufCount = buffers.size();
 
-        final int totalConsumed = wrapBufferArray(buffers);
+        final int totalConsumed = wrapBufferArray(buffers, finalWrite);
         if (_parent.checkForWriteAbort())
         {
             return new WriteResult(false, totalConsumed);
@@ -219,7 +242,9 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
 
         _needsReadForWrite = _encryptedOutput.isEmpty() &&
                 _sslEngine.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_UNWRAP;
-        return new WriteResult(bufsSent && _encryptedOutput.isEmpty(), totalConsumed);
+        // A peer can close TLS output before all application data has been sent.
+        return new WriteResult((bufsSent || (finalWrite && _sslEngine.isOutboundDone())) &&
+                               _encryptedOutput.isEmpty(), totalConsumed);
     }
 
     @Override
@@ -264,7 +289,7 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
 
     }
 
-    private int wrapBufferArray(final Collection<QpidByteBuffer> buffers) throws SSLException
+    private int wrapBufferArray(final Collection<QpidByteBuffer> buffers, final boolean finalWrite) throws SSLException
     {
         int totalConsumed = 0;
         boolean encrypted;
@@ -274,7 +299,8 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
             {
                 return totalConsumed;
             }
-            if(_sslEngine.getHandshakeStatus() != SSLEngineResult.HandshakeStatus.NEED_UNWRAP)
+            if ((!finalWrite || !_sslEngine.isOutboundDone()) &&
+                    _sslEngine.getHandshakeStatus() != SSLEngineResult.HandshakeStatus.NEED_UNWRAP)
             {
                 if(_netOutputBuffer.remaining() < _sslEngine.getSession().getPacketBufferSize())
                 {
@@ -291,7 +317,7 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
                 }
 
                 _status = QpidByteBuffer.encryptSSL(_sslEngine, buffers, _netOutputBuffer);
-                if(_status.getStatus() == SSLEngineResult.Status.CLOSED)
+                if (_status.getStatus() == SSLEngineResult.Status.CLOSED && !finalWrite)
                 {
                     throw new SSLException(String.format("SSLEngine.wrap operation could not be completed because"
                                     + " it was already closed (status %s, handshake status %s)",
@@ -488,7 +514,10 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
         }
         try
         {
-            _sslEngine.closeOutbound();
+            if (!_outboundCloseStarted)
+            {
+                _sslEngine.closeOutbound();
+            }
             _sslEngine.closeInbound();
         }
         catch (SSLException e)

@@ -255,17 +255,20 @@ public class EmbeddedBrokerPerClassAdminImpl implements BrokerAdmin
         return InetSocketAddress.createUnresolved("localhost", port);
     }
 
-    public InetSocketAddress createTlsWebSocketPort(final String name, final String keyStoreUrl, final String password)
+    public InetSocketAddress createTlsAmqpPort(final Transport transport, final String name,
+                                               final String keyStoreUrl, final String password)
     {
         final Subject subject = new Subject(true, Set.of(_systemLauncher.getSystemPrincipal(),
-                new TaskPrincipal("createTlsWebSocketPort")), Set.of(), Set.of());
+                new TaskPrincipal("createTlsAmqpPort")), Set.of(), Set.of());
         return SubjectExecutionContext.withSubjectUnchecked(subject, () ->
         {
             final KeyStore<?> keyStore = _broker.createChild(KeyStore.class, Map.of(KeyStore.NAME, name,
                     FileKeyStore.STORE_URL, keyStoreUrl, FileKeyStore.PASSWORD, password));
-            final Port<?> plainPort = _broker.getChildByName(Port.class, PortType.ANONYMOUS_AMQPWS.name());
+            final PortType plainPortType = transport == Transport.WSS ?
+                    PortType.ANONYMOUS_AMQPWS : PortType.ANONYMOUS_AMQP;
+            final Port<?> plainPort = _broker.getChildByName(Port.class, plainPortType.name());
             final Port<?> port = _broker.createChild(Port.class, Map.of(Port.NAME, name, Port.TYPE, "AMQP",
-                    Port.BINDING_ADDRESS, "localhost", Port.PORT, 0, Port.TRANSPORTS, Set.of(Transport.WSS),
+                    Port.BINDING_ADDRESS, "localhost", Port.PORT, 0, Port.TRANSPORTS, Set.of(transport),
                     Port.PROTOCOLS, Set.of(Protocol.AMQP_1_0), Port.KEY_STORE, keyStore.getName(),
                     Port.AUTHENTICATION_PROVIDER, plainPort.getAuthenticationProvider().getName()));
             return new InetSocketAddress("localhost", port.getBoundPort());

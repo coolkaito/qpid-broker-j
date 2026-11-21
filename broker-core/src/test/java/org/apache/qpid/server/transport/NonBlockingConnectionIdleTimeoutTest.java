@@ -118,7 +118,7 @@ class NonBlockingConnectionIdleTimeoutTest extends UnitTestBase
     void tickerCloseSkipsOrdinaryIoAndRunsShutdown() throws Exception
     {
         final NonBlockingConnectionDelegate delegate = mock(NonBlockingConnectionDelegate.class);
-        when(delegate.doWrite(any())).thenReturn(new NonBlockingConnectionDelegate.WriteResult(true, 0));
+        when(delegate.doFinalWrite(any())).thenReturn(new NonBlockingConnectionDelegate.WriteResult(true, 0));
         injectDelegate(delegate);
         when(_ticker.getTimeToNextTick(anyLong())).thenReturn(0);
         doAnswer(invocation ->
@@ -133,7 +133,8 @@ class NonBlockingConnectionIdleTimeoutTest extends UnitTestBase
         verify(_protocolEngine, never()).processPendingIterator();
         verify(_protocolEngine, never()).setTransportBlockedForWriting(anyBoolean());
         verify(delegate, never()).readyForRead();
-        verify(delegate, times(1)).doWrite(any());
+        verify(delegate, never()).doWrite(any());
+        verify(delegate, times(1)).doFinalWrite(any());
         verify(_protocolEngine, times(1)).closed();
         verify(delegate, times(1)).shutdownInput();
         verify(delegate, times(1)).shutdownOutput();
@@ -181,6 +182,7 @@ class NonBlockingConnectionIdleTimeoutTest extends UnitTestBase
         when(_protocolEngine.processPendingIterator()).thenReturn(pendingIterator);
 
         final NonBlockingConnectionDelegate delegate = mock(NonBlockingConnectionDelegate.class);
+        when(delegate.doFinalWrite(any())).thenCallRealMethod();
         when(delegate.doWrite(any())).thenAnswer(invocation ->
         {
             if (!readerIdle.get())

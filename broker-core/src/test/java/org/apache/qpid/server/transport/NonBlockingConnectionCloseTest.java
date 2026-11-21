@@ -35,6 +35,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -471,6 +472,60 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         assertClosedAndReleased();
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void finalTlsAlertRetriesRespectProtocolDeadline(final boolean expireDuringWrite) throws Exception
+    {
+        createConnection(TransportEncryption.TLS);
+        final AtomicBoolean expired = new AtomicBoolean();
+        final AtomicBoolean closeStarted = new AtomicBoolean();
+        final AtomicBoolean outboundDone = new AtomicBoolean();
+        final AtomicBoolean firstWrite = new AtomicBoolean(true);
+        installDeadline(expired);
+
+        doAnswer(invocation ->
+        {
+            closeStarted.set(true);
+            return null;
+        }).when(_sslEngine).closeOutbound();
+        when(_sslEngine.isOutboundDone()).thenAnswer(invocation -> outboundDone.get());
+        doAnswer(invocation ->
+        {
+            final ByteBuffer[] sources = invocation.getArgument(0);
+            final ByteBuffer target = invocation.getArgument(1);
+            if (closeStarted.get())
+            {
+                assertEquals(0, sources.length);
+                assertFalse(outboundDone.get(), "TLS alert must be wrapped once");
+                target.put((byte) 1);
+                outboundDone.set(true);
+                return new SSLEngineResult(SSLEngineResult.Status.CLOSED,
+                                           SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING, 0, 1);
+            }
+            return wrapTlsOutput(sources, target, SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING);
+        }).when(_sslEngine).wrap(any(ByteBuffer[].class), any(ByteBuffer.class));
+        doAnswer(invocation ->
+        {
+            final ByteBuffer[] output = invocation.getArgument(0);
+            final ByteBuffer alert = output[0];
+            assertEquals(1, alert.remaining());
+            if (firstWrite.getAndSet(false))
+            {
+                expired.set(expireDuringWrite);
+                return 0L;
+            }
+            alert.position(alert.limit());
+            return 1L;
+        }).when(_socket).write(any(ByteBuffer[].class));
+
+        _connection.close();
+        assertTrue(_connection.doWork());
+
+        verify(_sslEngine).closeOutbound();
+        verify(_socket, times(expireDuringWrite ? 1 : 2)).write(any(ByteBuffer[].class));
+        assertClosedAndReleased();
+    }
+
     @Test
     void repeatedDeadlineDoesNotExtendFinalWrite() throws Exception
     {
@@ -722,6 +777,13 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         when(_sslEngine.wrap(any(ByteBuffer[].class), any(ByteBuffer.class))).thenAnswer(invocation ->
                 wrapTlsOutput(invocation.getArgument(0), invocation.getArgument(1),
                         SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING));
+        final AtomicBoolean outboundDone = new AtomicBoolean();
+        when(_sslEngine.isOutboundDone()).thenAnswer(invocation -> outboundDone.get());
+        doAnswer(invocation ->
+        {
+            outboundDone.set(true);
+            return null;
+        }).when(_sslEngine).closeOutbound();
     }
 
     private SSLEngineResult wrapTlsOutput(final ByteBuffer[] sources,
