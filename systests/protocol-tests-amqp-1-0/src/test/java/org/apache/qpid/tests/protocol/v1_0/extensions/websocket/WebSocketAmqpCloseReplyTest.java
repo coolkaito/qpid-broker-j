@@ -21,9 +21,12 @@
 package org.apache.qpid.tests.protocol.v1_0.extensions.websocket;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
+import java.lang.reflect.Field;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -34,10 +37,13 @@ import org.apache.qpid.server.model.Connection;
 import org.apache.qpid.server.model.Transport;
 import org.apache.qpid.server.model.port.AmqpPort;
 import org.apache.qpid.server.protocol.v1_0.type.transport.Close;
+import org.apache.qpid.server.transport.AbstractAMQPConnection;
+import org.apache.qpid.server.transport.ServerNetworkConnection;
 import org.apache.qpid.tests.protocol.v1_0.Interaction;
 import org.apache.qpid.tests.utils.BrokerAdmin;
 import org.apache.qpid.tests.utils.BrokerSpecific;
 import org.apache.qpid.tests.utils.ConfigItem;
+import org.apache.qpid.tests.utils.EmbeddedBrokerPerClassAdminImpl;
 
 @BrokerSpecific(kind = BrokerAdmin.KIND_BROKER_J)
 @ConfigItem(name = Connection.CLOSE_RESPONSE_TIMEOUT, value = "10000")
@@ -50,11 +56,12 @@ public class WebSocketAmqpCloseReplyTest extends WebSocketCloseTestBase
     @EnumSource(value = Transport.class, names = {"WS", "WSS"})
     public void clientReceivesAmqpCloseReplyAtZeroPortTimeout(final Transport transportType) throws Exception
     {
+        final String containerId = getFullTestName();
         try (final WebSocketFrameTransport transport = createTransport(transportType))
         {
             transport.withholdWebSocketCloseResponse().connect();
-            final Interaction interaction = transport
-                    .newInteraction().openContainerId(getFullTestName()).negotiateOpen();
+            final Interaction interaction = transport.newInteraction().openContainerId(containerId).negotiateOpen();
+            awaitPreviousBrokerWrite(containerId);
             interaction.close().sync().consumeResponse(Close.class);
             assertNull(interaction.getLatestResponse(Close.class).getError());
             transport.getChannelCloseFuture().get(AWAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -75,6 +82,7 @@ public class WebSocketAmqpCloseReplyTest extends WebSocketCloseTestBase
             final Interaction interaction = transport.newInteraction().openContainerId(containerId).negotiateOpen();
             final CompletableFuture<Void> close = getBrokerAdmin().closeConnectionAsync(containerId);
             interaction.consumeResponse(Close.class);
+            awaitPreviousBrokerWrite(containerId);
             interaction.close().sync();
 
             transport.getChannelCloseFuture().get(AWAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -83,5 +91,44 @@ public class WebSocketAmqpCloseReplyTest extends WebSocketCloseTestBase
                     "Expected a WebSocket Close after the AMQP Close exchange");
             assertEquals(1000, transport.getWebSocketCloseStatusCode());
         }
+    }
+
+    private void awaitPreviousBrokerWrite(final String containerId)
+            throws ReflectiveOperationException, InterruptedException
+    {
+        if (getBrokerAdmin() instanceof EmbeddedBrokerPerClassAdminImpl admin)
+        {
+            final AbstractAMQPConnection<?, ?> connection =
+                    (AbstractAMQPConnection<?, ?>) admin.findConnection(containerId);
+            assertNotNull(connection, "Broker did not register the AMQP connection");
+            final ServerNetworkConnection network = connection.getNetwork();
+            final Object writer = field(network, "_writeJob").get(network);
+            final Object queue = field(writer, "_queue").get(writer);
+            final Field pending = field(writer, "_writePending");
+
+            // The peer can receive a frame before its write callback runs. At zero timeout the broker
+            // may close immediately while that write is pending.
+            final long start = System.nanoTime();
+            do
+            {
+                synchronized (queue)
+                {
+                    if (!pending.getBoolean(writer))
+                    {
+                        return;
+                    }
+                }
+                TimeUnit.MILLISECONDS.sleep(1L);
+            }
+            while (System.nanoTime() - start < TimeUnit.SECONDS.toNanos(AWAIT_TIMEOUT_SECONDS));
+            fail("The broker did not finish its preceding WebSocket write");
+        }
+    }
+
+    private static Field field(final Object owner, final String name) throws NoSuchFieldException
+    {
+        final Field field = owner.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field;
     }
 }

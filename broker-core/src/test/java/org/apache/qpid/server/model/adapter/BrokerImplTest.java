@@ -21,9 +21,14 @@
 package org.apache.qpid.server.model.adapter;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -33,7 +38,9 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -70,6 +77,8 @@ import org.apache.qpid.test.utils.UnitTestBase;
 @SuppressWarnings({"rawtypes"})
 public class BrokerImplTest extends UnitTestBase
 {
+    private static final long DIRECT_MEMORY_CHECK_INTERVAL = TimeUnit.DAYS.toMillis(1L);
+
     private TaskExecutorImpl _taskExecutor;
     private SystemConfig _systemConfig;
     private BrokerImpl _brokerImpl;
@@ -135,6 +144,75 @@ public class BrokerImplTest extends UnitTestBase
     {
         final long flowToDiskThreshold = 3L * 1024 * 1024 * 1024;
         doAssignTargetSizeTest(new long[] {4L * 1024 * 1024 * 1024, 0, 0 , 0}, flowToDiskThreshold);
+    }
+
+    @Test
+    public void testCloseCancelsRescheduledDirectMemoryCheck() throws Exception
+    {
+        _brokerImpl = spy(new BrokerImpl(directMemoryCheckAttributes(), _systemConfig));
+        final CompletableFuture<ScheduledFuture<?>> rescheduled = new CompletableFuture<>();
+        doAnswer(invocation -> _brokerImpl.scheduleTask(0L, TimeUnit.MILLISECONDS, invocation.getArgument(2)))
+                .doAnswer(invocation ->
+                {
+                    final ScheduledFuture<?> check = (ScheduledFuture<?>) invocation.callRealMethod();
+                    rescheduled.complete(check);
+                    return check;
+                })
+                .when(_brokerImpl).scheduleTask(eq(DIRECT_MEMORY_CHECK_INTERVAL), eq(TimeUnit.MILLISECONDS), any());
+
+        _brokerImpl.open();
+        final ScheduledFuture<?> next = rescheduled.get(5L, TimeUnit.SECONDS);
+
+        final Runnable otherTask = mock();
+        _brokerImpl.scheduleTask(10L, TimeUnit.MILLISECONDS, otherTask);
+        _brokerImpl.close();
+        assertTrue(next.isCancelled(), "The rescheduled direct memory check should be cancelled");
+        verify(otherTask).run();
+    }
+
+    @Test
+    public void testCloseReportsFailureFromRunningDirectMemoryCheck() throws Exception
+    {
+        final TestBroker broker = spy(new TestBroker(directMemoryCheckAttributes(), _systemConfig));
+        _brokerImpl = broker;
+        final CompletableFuture<Void> checkStarted = new CompletableFuture<>();
+        final CompletableFuture<Void> finishCheck = new CompletableFuture<>();
+        final CompletableFuture<Throwable> reported = new CompletableFuture<>();
+        final RuntimeException failure = new IllegalStateException("Direct memory check failed");
+        doAnswer(invocation ->
+        {
+            final Runnable check = invocation.getArgument(2);
+            return broker.scheduleTask(0L, TimeUnit.MILLISECONDS, () ->
+            {
+                Thread.currentThread().setUncaughtExceptionHandler((thread, error) -> reported.complete(error));
+                checkStarted.complete(null);
+                finishCheck.join();
+                check.run();
+                throw failure;
+            });
+        }).when(broker).scheduleTask(eq(DIRECT_MEMORY_CHECK_INTERVAL), eq(TimeUnit.MILLISECONDS), any());
+
+        try
+        {
+            broker.open();
+            checkStarted.get(5L, TimeUnit.SECONDS);
+            final CompletableFuture<Void> closing = broker.closeAsync();
+            final long waitStarted = System.nanoTime();
+            while (!broker.isHousekeepingShutdown() && System.nanoTime() - waitStarted < TimeUnit.SECONDS.toNanos(5L))
+            {
+                TimeUnit.MILLISECONDS.sleep(1L);
+            }
+            assertTrue(broker.isHousekeepingShutdown(), "The housekeeping executor should start shutting down");
+            finishCheck.complete(null);
+            closing.get(5L, TimeUnit.SECONDS);
+
+            assertSame(failure, reported.getNow(null), "The running check's failure should reach the handler");
+            verify(broker).scheduleTask(eq(DIRECT_MEMORY_CHECK_INTERVAL), eq(TimeUnit.MILLISECONDS), any());
+        }
+        finally
+        {
+            finishCheck.complete(null);
+        }
     }
 
     @Test
@@ -256,6 +334,13 @@ public class BrokerImplTest extends UnitTestBase
         assertEquals(0L, statisticsAfterReset.get("transactedMessagesOut"));
     }
 
+    private static Map<String, Object> directMemoryCheckAttributes()
+    {
+        return Map.of(Broker.NAME, "Broker", Broker.DURABLE, true, Broker.MODEL_VERSION, BrokerModel.MODEL_VERSION,
+                      Broker.CONTEXT, Map.of(Broker.COMPACT_MEMORY_INTERVAL, DIRECT_MEMORY_CHECK_INTERVAL,
+                                             Broker.COMPACT_MEMORY_THRESHOLD, -1L));
+    }
+
     private Collection<Preference> getPreferencesAs(final Subject testUserSubject) throws Exception
     {
         return SubjectExecutionContext.withSubject(testUserSubject, () ->
@@ -326,5 +411,18 @@ public class BrokerImplTest extends UnitTestBase
             }
         };
         vh.create();
+    }
+
+    private static final class TestBroker extends BrokerImpl
+    {
+        private TestBroker(final Map<String, Object> attributes, final SystemConfig<?> systemConfig)
+        {
+            super(attributes, systemConfig);
+        }
+
+        private boolean isHousekeepingShutdown()
+        {
+            return _houseKeepingTaskExecutor.isShutdown();
+        }
     }
 }
