@@ -25,31 +25,45 @@ import org.apache.qpid.server.transport.network.TransportActivity;
 
 public class ServerIdleWriteTimeoutTicker implements Ticker
 {
+    private final ServerNetworkConnection _connection;
     private final TransportActivity _transport;
     private final int _writeDelay;
 
-    public ServerIdleWriteTimeoutTicker(TransportActivity transport, int writeDelay)
+    public ServerIdleWriteTimeoutTicker(final TransportActivity transport, final int writeDelay)
+    {
+        this(null, transport, writeDelay);
+    }
+
+    public ServerIdleWriteTimeoutTicker(final ServerNetworkConnection connection,
+                                        final TransportActivity transport,
+                                        final int writeDelay)
     {
         if (writeDelay <= 0)
         {
             throw new IllegalArgumentException("Write delay should be positive");
         }
 
+        _connection = connection;
         _transport = transport;
         _writeDelay = writeDelay;
     }
 
     @Override
-    public int getTimeToNextTick(long currentTime)
+    public int getTimeToNextTick(final long currentTime)
     {
-        long writeTime = _transport.getLastWriteTime() + _writeDelay;
+        if (_connection != null && _connection.hasPendingWrites())
+        {
+            // A heartbeat would sit behind the output that is already waiting to be written.
+            return _writeDelay;
+        }
+        final long writeTime = _transport.getLastWriteTime() + _writeDelay;
         return (int) (writeTime - currentTime);
     }
 
     @Override
-    public int tick(long currentTime)
+    public int tick(final long currentTime)
     {
-        int timeToNextTick = getTimeToNextTick(currentTime);
+        final int timeToNextTick = getTimeToNextTick(currentTime);
         if (timeToNextTick <= 0)
         {
             _transport.writerIdle();

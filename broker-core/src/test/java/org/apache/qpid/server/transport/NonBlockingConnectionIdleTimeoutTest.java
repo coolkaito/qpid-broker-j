@@ -118,7 +118,7 @@ class NonBlockingConnectionIdleTimeoutTest extends UnitTestBase
     void tickerCloseSkipsOrdinaryIoAndRunsShutdown() throws Exception
     {
         final NonBlockingConnectionDelegate delegate = mock(NonBlockingConnectionDelegate.class);
-        when(delegate.doWrite(any())).thenReturn(new NonBlockingConnectionDelegate.WriteResult(true, 0));
+        when(delegate.doWrite(any())).thenReturn(new NonBlockingConnectionDelegate.WriteResult(true, 0, 0));
         injectDelegate(delegate);
         when(_ticker.getTimeToNextTick(anyLong())).thenReturn(0);
         doAnswer(invocation ->
@@ -185,7 +185,7 @@ class NonBlockingConnectionIdleTimeoutTest extends UnitTestBase
         {
             if (!readerIdle.get())
             {
-                return new NonBlockingConnectionDelegate.WriteResult(false, 0);
+                return new NonBlockingConnectionDelegate.WriteResult(false, 0, 0);
             }
 
             long bytesConsumed = 0;
@@ -195,7 +195,7 @@ class NonBlockingConnectionIdleTimeoutTest extends UnitTestBase
                 bytesConsumed += buffer.remaining();
                 buffer.position(buffer.limit());
             }
-            return new NonBlockingConnectionDelegate.WriteResult(true, bytesConsumed);
+            return new NonBlockingConnectionDelegate.WriteResult(true, bytesConsumed, bytesConsumed);
         });
         injectDelegate(delegate);
 

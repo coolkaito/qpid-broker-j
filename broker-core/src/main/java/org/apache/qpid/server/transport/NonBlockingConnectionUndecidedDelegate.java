@@ -75,7 +75,7 @@ public class NonBlockingConnectionUndecidedDelegate implements NonBlockingConnec
     @Override
     public WriteResult doWrite(Collection<QpidByteBuffer> buffers) throws IOException
     {
-        return new WriteResult(true, 0L);
+        return new WriteResult(true, 0, 0);
     }
 
     @Override

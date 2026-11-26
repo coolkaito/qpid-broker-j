@@ -426,7 +426,7 @@ class NonBlockingConnectionWriteTest extends UnitTestBase
     {
         final NonBlockingConnectionDelegate delegate = mock(NonBlockingConnectionDelegate.class);
         when(delegate.readyForRead()).thenReturn(false);
-        when(delegate.doWrite(any())).thenReturn(new NonBlockingConnectionDelegate.WriteResult(false, 0));
+        when(delegate.doWrite(any())).thenReturn(new NonBlockingConnectionDelegate.WriteResult(false, 0, 0));
         final Field field = NonBlockingConnection.class.getDeclaredField("_delegate");
         field.setAccessible(true);
         ((NonBlockingConnectionDelegate) field.get(_connection)).shutdownInput();
@@ -468,7 +468,7 @@ class NonBlockingConnectionWriteTest extends UnitTestBase
                     buffer.position(buffer.limit());
                 }
             }
-            return new NonBlockingConnectionDelegate.WriteResult(inputProcessed.get(), consumed);
+            return new NonBlockingConnectionDelegate.WriteResult(inputProcessed.get(), consumed, consumed);
         });
         final Field field = NonBlockingConnection.class.getDeclaredField("_delegate");
         field.setAccessible(true);

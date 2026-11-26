@@ -44,6 +44,7 @@ import org.apache.qpid.server.logging.EventLogger;
 import org.apache.qpid.server.logging.messages.NetworkMessages;
 import org.apache.qpid.server.model.Broker;
 import org.apache.qpid.server.model.port.AmqpPort;
+import org.apache.qpid.server.transport.NonBlockingConnectionDelegate.WriteResult;
 import org.apache.qpid.server.transport.network.Ticker;
 import org.apache.qpid.server.transport.network.TransportEncryption;
 import org.apache.qpid.server.util.ConnectionScopedRuntimeException;
@@ -51,6 +52,7 @@ import org.apache.qpid.server.util.SystemUtils;
 
 public class NonBlockingConnection implements ServerNetworkConnection, ByteBufferSender
 {
+    private static final int MAX_DRAIN_BATCHES = 4;
     private static final Logger LOGGER = LoggerFactory.getLogger(NonBlockingConnection.class);
 
     private final SocketChannel _socketChannel;
@@ -82,7 +84,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
     private final AtomicLong _maxReadIdleMillis = new AtomicLong();
     private final List<SchedulingDelayNotificationListener> _schedulingDelayNotificationListeners = new CopyOnWriteArrayList<>();
     private final AtomicBoolean _hasShutdown = new AtomicBoolean();
-    private volatile long _bufferedSize;
+    private volatile long _bufferedApplicationBytes;
     private String _selectedHost;
     private volatile boolean _aborted;
     private volatile Ticker _closeDeadline;
@@ -244,12 +246,19 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
 
     boolean wantsRead()
     {
-        return (_fullyWritten || _pendingIterator == null || _delegate.needsReadForWrite()) && _delegate.readyForRead();
+        return (_fullyWritten || (_pendingIterator == null && getBufferedSize() < _port.getNetworkBufferSize()) ||
+                _delegate.needsReadForWrite()) && _delegate.readyForRead();
     }
 
     boolean wantsWrite()
     {
         return !_fullyWritten && !_delegate.needsReadForWrite();
+    }
+
+    @Override
+    public boolean hasPendingWrites()
+    {
+        return !_fullyWritten || _bufferedApplicationBytes > 0;
     }
 
     public boolean isStateChanged()
@@ -397,15 +406,16 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
         }
 
         final int networkBufferSize = _port.getNetworkBufferSize();
+        final int minimumWriteProgress = networkBufferSize / 2;
 
+        // A pending operation starts below the threshold and may enqueue a full delivery.
+        // The TLS delegate retains at most one network buffer of ciphertext, including its record overhead.
         while (!_closed.get() && !isCloseDeadlineExpired() && _pendingIterator.hasNext())
         {
-            long size = getBufferedSize();
-            if(size >= networkBufferSize)
+            if (getBufferedSize() >= networkBufferSize)
             {
-                doWrite();
-                long bytesWritten = size - getBufferedSize();
-                if(bytesWritten < (networkBufferSize / 2))
+                final long bytesWritten = doWrite().getSocketBytesWritten();
+                if (bytesWritten < minimumWriteProgress)
                 {
                     break;
                 }
@@ -422,18 +432,27 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
             return false;
         }
 
-        boolean complete = !_pendingIterator.hasNext();
+        final boolean complete = !_pendingIterator.hasNext();
         if (getBufferedSize() >= networkBufferSize)
         {
-            doWrite();
-            complete &= getBufferedSize() < networkBufferSize /2;
+            // A single delivery can span several TLS batches. Drain a few while the socket is making progress.
+            for (int batch = 0; batch < MAX_DRAIN_BATCHES; batch++)
+            {
+                final long bytesWritten = doWrite().getSocketBytesWritten();
+                if (!complete || bytesWritten < minimumWriteProgress || getBufferedSize() < minimumWriteProgress ||
+                        _closed.get() || isCloseDeadlineExpired())
+                {
+                    break;
+                }
+            }
+            return complete && getBufferedSize() < minimumWriteProgress;
         }
         return complete;
     }
 
-    private long getBufferedSize()
+    long getBufferedSize()
     {
-        return _bufferedSize;
+        return _bufferedApplicationBytes + _delegate.getBufferedOutputSize();
     }
 
     private void shutdown()
@@ -494,7 +513,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
         {
             final long startTime = System.currentTimeMillis();
             int cnt = 0;
-            while (!checkForWriteAbort() && !doWrite())
+            while (!checkForWriteAbort() && !doWrite().isComplete())
             {
                 if (cnt % _finalWriteThreshold == 0 && System.currentTimeMillis() - startTime > _finalWriteTimeout)
                 {
@@ -553,6 +572,7 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
                 final QpidByteBuffer buffer = _buffers.poll();
                 buffer.dispose();
             }
+            _bufferedApplicationBytes = 0;
         }
 
     }
@@ -616,22 +636,41 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
         return written;
     }
 
-    private boolean doWrite() throws IOException
+    long writeToTransport(final QpidByteBuffer buffer) throws IOException
     {
-        final NonBlockingConnectionDelegate.WriteResult result = _delegate.doWrite(_buffers);
-        _bufferedSize -= result.getBytesConsumed();
-        _fullyWritten = result.isComplete();
-        while(!_buffers.isEmpty())
+        if (checkForWriteAbort())
         {
-            QpidByteBuffer buf = _buffers.peek();
-            if(buf.hasRemaining())
-            {
-                break;
-            }
-            _buffers.poll();
-            buf.dispose();
+            return 0L;
         }
-        return _fullyWritten;
+        final long written = QpidByteBuffer.write(_socketChannel, buffer);
+        if (LOGGER.isDebugEnabled())
+        {
+            LOGGER.debug("Written {} bytes", written);
+        }
+        return written;
+    }
+
+    private WriteResult doWrite() throws IOException
+    {
+        final WriteResult result = _delegate.doWrite(_buffers);
+        _bufferedApplicationBytes -= result.getBytesConsumed();
+        _fullyWritten = result.isComplete();
+        releaseConsumedBuffers(_buffers);
+        return result;
+    }
+
+    void releaseConsumedBuffers(final Collection<QpidByteBuffer> buffers)
+    {
+        if (buffers != _buffers)
+        {
+            return;
+        }
+        for (QpidByteBuffer buffer = _buffers.peek(); buffer != null && !buffer.hasRemaining();
+             buffer = _buffers.peek())
+        {
+            _buffers.poll();
+            buffer.dispose();
+        }
     }
 
     protected long readFromNetwork() throws IOException
@@ -673,8 +712,16 @@ public class NonBlockingConnection implements ServerNetworkConnection, ByteBuffe
             int remaining = msg.remaining();
             if (remaining > 0)
             {
-                _buffers.add(msg.duplicate());
-                _bufferedSize += remaining;
+                if (_delegate instanceof NonBlockingConnectionTLSDelegate)
+                {
+                    // Each fragment can leave the queue as soon as TLS consumes it.
+                    QpidByteBuffer.addDuplicateFragments(msg, _buffers);
+                }
+                else
+                {
+                    _buffers.add(msg.duplicate());
+                }
+                _bufferedApplicationBytes += remaining;
             }
         }
         msg.position(msg.limit());

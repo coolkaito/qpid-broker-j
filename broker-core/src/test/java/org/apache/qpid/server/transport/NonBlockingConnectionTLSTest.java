@@ -28,6 +28,8 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayOutputStream;
@@ -35,8 +37,11 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Set;
 
 import javax.net.ssl.SSLContext;
@@ -293,6 +298,129 @@ class NonBlockingConnectionTLSTest extends UnitTestBase
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"TLSv1.2, false", "TLSv1.2, true", "TLSv1.3, false", "TLSv1.3, true"})
+    void testPendingOutputStaysBoundedUntilSocketWritesResume(final String protocol, final boolean oversizedOperation)
+            throws Exception
+    {
+        try (final TlsConnection tls = new TlsConnection(protocol))
+        {
+            tls.finishHandshake();
+            final int operationSize = oversizedOperation ? 2 * NETWORK_BUFFER_SIZE : NETWORK_BUFFER_SIZE / 4;
+            final int operationCount = 32;
+            final byte[] expected = new byte[operationCount * operationSize];
+            final List<Runnable> operations = new ArrayList<>(operationCount);
+            for (int i = 0; i < operationCount; i++)
+            {
+                final int offset = i * operationSize;
+                Arrays.fill(expected, offset, offset + operationSize, (byte) i);
+                operations.add(() ->
+                {
+                    try (final QpidByteBuffer buffer = QpidByteBuffer.wrap(expected, offset, operationSize))
+                    {
+                        tls._connection.send(buffer);
+                    }
+                });
+            }
+            final ListIterator<Runnable> pending = operations.listIterator();
+            when(tls._engine.processPendingIterator()).thenReturn(pending);
+
+            tls._writeAllowance = 0;
+            assertFalse(tls._connection.doWork());
+            final long buffered = tls._connection.getBufferedSize();
+            final int completed = pending.nextIndex();
+            final long bound = 2L * NETWORK_BUFFER_SIZE + operationSize;
+            assertTrue(buffered >= NETWORK_BUFFER_SIZE);
+            assertTrue(buffered <= bound, "The allowance covers one operation and one TLS output buffer");
+            assertTrue(completed > 0 && pending.hasNext(), "Some operations must be deferred");
+            assertTrue(tls._blocked);
+            assertFalse(tls._connection.wantsRead(), "More input can produce output while the queue is full");
+
+            final int writeIdleMillis = 1000;
+            final ServerIdleWriteTimeoutTicker writeIdle =
+                    new ServerIdleWriteTimeoutTicker(tls._connection, tls._engine, writeIdleMillis);
+            for (int pass = 0; pass < 4; pass++)
+            {
+                assertEquals(writeIdleMillis, writeIdle.tick(writeIdleMillis + pass));
+                assertFalse(tls._connection.doWork());
+                assertTrue(tls._connection.wantsWrite());
+                assertFalse(tls._connection.isStateChanged(), "A stalled connection must wait for socket readiness");
+                assertEquals(completed, pending.nextIndex());
+                assertEquals(buffered, tls._connection.getBufferedSize());
+            }
+            verify(tls._engine, never()).writerIdle();
+            assertEquals(0, tls._toPeer.position());
+
+            // A short write must leave the rest of the TLS batch in order.
+            tls._writeAllowance = 1;
+            assertFalse(tls._connection.doWork());
+            assertEquals(buffered - 1, tls._connection.getBufferedSize());
+            assertEquals(completed, pending.nextIndex());
+
+            for (int pass = 0; pass < operationCount * 4 && (pending.hasNext() || tls._connection.wantsWrite()); pass++)
+            {
+                tls._writeAllowance = Integer.MAX_VALUE;
+                assertFalse(tls._connection.doWork());
+                assertTrue(tls._connection.getBufferedSize() <= bound);
+                tls.readAtPeer();
+            }
+            assertFalse(pending.hasNext());
+            assertFalse(tls._blocked);
+            assertFalse(tls._connection.wantsWrite());
+            assertEquals(0, tls._connection.getBufferedSize());
+            assertArrayEquals(expected, tls._peerReceived.toByteArray());
+            assertEquals(0, writeIdle.tick(writeIdleMillis));
+            verify(tls._engine).writerIdle();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TLSv1.2", "TLSv1.3"})
+    void testPartialWriteReleasesConsumedDirectFragments(final String protocol) throws Exception
+    {
+        QpidByteBuffer.deinitialisePool();
+        QpidByteBuffer.initialisePool(NETWORK_BUFFER_SIZE, 16, 0.5);
+        try (final TlsConnection tls = new TlsConnection(protocol))
+        {
+            tls.finishHandshake();
+            final int initialBuffers = QpidByteBuffer.getNumberOfBuffersInUse();
+            final int firstSize = NETWORK_BUFFER_SIZE / 2;
+            final byte[] outbound = new byte[firstSize + NETWORK_BUFFER_SIZE];
+            Arrays.fill(outbound, firstSize, outbound.length, (byte) 1);
+            try (final QpidByteBuffer first = QpidByteBuffer.allocateDirect(NETWORK_BUFFER_SIZE);
+                 final QpidByteBuffer second = QpidByteBuffer.allocateDirect(NETWORK_BUFFER_SIZE))
+            {
+                first.put(outbound, 0, firstSize);
+                second.put(outbound, firstSize, NETWORK_BUFFER_SIZE);
+                first.flip();
+                second.flip();
+                try (final QpidByteBuffer fragmented = QpidByteBuffer.concatenate(first, second))
+                {
+                    tls._connection.send(fragmented);
+                }
+            }
+            assertEquals(initialBuffers + 2, QpidByteBuffer.getNumberOfBuffersInUse());
+
+            tls._writeAllowance = 1;
+            assertFalse(tls._connection.doWork());
+            assertTrue(tls._connection.wantsWrite());
+            assertEquals(1, tls._toPeer.position());
+            assertEquals(initialBuffers + 1, QpidByteBuffer.getNumberOfBuffersInUse(),
+                    "TLS must release the first fragment while ciphertext is still pending");
+
+            tls._writeAllowance = Integer.MAX_VALUE;
+            assertFalse(tls._connection.doWork());
+            assertFalse(tls._connection.wantsWrite());
+            assertEquals(initialBuffers, QpidByteBuffer.getNumberOfBuffersInUse());
+            tls.readAtPeer();
+            assertArrayEquals(outbound, tls._peerReceived.toByteArray());
+        }
+        finally
+        {
+            QpidByteBuffer.deinitialisePool();
+        }
+    }
+
     /** Real TLS engines with explicitly granted socket capacity; all work runs on the test thread */
     private final class TlsConnection implements AutoCloseable
     {
@@ -327,15 +455,10 @@ class NonBlockingConnectionTLSTest extends UnitTestBase
                 _readAllowance -= read;
                 return read;
             });
-            when(channel.write(any(ByteBuffer[].class))).thenAnswer(invocation ->
+            when(channel.write(any(ByteBuffer.class))).thenAnswer(invocation ->
             {
-                long written = 0;
-                for (final ByteBuffer buffer : (ByteBuffer[]) invocation.getArgument(0))
-                {
-                    final int count = transfer(buffer, _toPeer, _writeAllowance);
-                    written += count;
-                    _writeAllowance -= count;
-                }
+                final int written = transfer(invocation.getArgument(0), _toPeer, _writeAllowance);
+                _writeAllowance -= written;
                 return written;
             });
             final ProtocolEngine engine = _engine;

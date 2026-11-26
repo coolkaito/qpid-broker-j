@@ -113,7 +113,7 @@ class NonBlockingConnectionTest
     {
         // construct delegate mock returning WriteResult[complete=false]
         final NonBlockingConnectionPlainDelegate delegate = mock(NonBlockingConnectionPlainDelegate.class);
-        when(delegate.doWrite(any())).thenReturn(new NonBlockingConnectionDelegate.WriteResult(false, 0L));
+        when(delegate.doWrite(any())).thenReturn(new NonBlockingConnectionDelegate.WriteResult(false, 0, 0));
         injectDelegate(delegate);
 
         // close the connection
@@ -143,7 +143,7 @@ class NonBlockingConnectionTest
     {
         // construct delegate mock returning WriteResult[complete=true]
         final NonBlockingConnectionPlainDelegate delegate = mock(NonBlockingConnectionPlainDelegate.class);
-        when(delegate.doWrite(any())).thenReturn(new NonBlockingConnectionDelegate.WriteResult(true, 0L));
+        when(delegate.doWrite(any())).thenReturn(new NonBlockingConnectionDelegate.WriteResult(true, 0, 0));
         injectDelegate(delegate);
 
         // close the connection

@@ -29,7 +29,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.ThreadFactory;
 import java.util.zip.GZIPInputStream;
@@ -142,50 +141,82 @@ final class QpidByteBufferFactory
         }
     }
 
-    private static ByteBuffer[] getUnderlyingBuffers(QpidByteBuffer buffer)
+    static void addDuplicateFragments(final QpidByteBuffer source, final Collection<QpidByteBuffer> target)
     {
-        if (buffer instanceof SingleQpidByteBuffer)
+        if (source instanceof MultiQpidByteBuffer multi)
         {
-            return new ByteBuffer[] {((SingleQpidByteBuffer) buffer).getUnderlyingBuffer()};
-        }
-        else if (buffer instanceof MultiQpidByteBuffer)
-        {
-            return ((MultiQpidByteBuffer) buffer).getUnderlyingBuffers();
+            final SingleQpidByteBuffer[] fragments = multi.getFragments();
+            final List<QpidByteBuffer> duplicates = new ArrayList<>(fragments.length);
+            for (final SingleQpidByteBuffer fragment : fragments)
+            {
+                if (fragment.hasRemaining())
+                {
+                    duplicates.add(fragment.duplicate());
+                }
+            }
+            target.addAll(duplicates);
         }
         else
         {
-            throw new IllegalStateException("Unknown Buffer Implementation");
+            target.add(source.duplicate());
         }
     }
 
-    static SSLEngineResult encryptSSL(SSLEngine engine,
-                                      Collection<QpidByteBuffer> buffers,
-                                      QpidByteBuffer dest) throws SSLException
+    static SSLEngineResult encryptSSL(final SSLEngine engine,
+                                      final Collection<QpidByteBuffer> buffers,
+                                      final QpidByteBuffer dest) throws SSLException
     {
-        if (dest instanceof SingleQpidByteBuffer)
-        {
-            SingleQpidByteBuffer dst = (SingleQpidByteBuffer) dest;
-            final ByteBuffer[] src;
-            // QPID-7447: prevent unnecessary allocations
-            if (buffers.isEmpty())
-            {
-                src = EMPTY_BYTE_BUFFER_ARRAY;
-            }
-            else
-            {
-                List<ByteBuffer> buffers_ = new LinkedList<>();
-                for (QpidByteBuffer buffer : buffers)
-                {
-                    Collections.addAll(buffers_, getUnderlyingBuffers(buffer));
-                }
-                src = buffers_.toArray(new ByteBuffer[buffers_.size()]);
-            }
-            return engine.wrap(src, dst.getUnderlyingBuffer());
-        }
-        else
+        if (!(dest instanceof SingleQpidByteBuffer output))
         {
             throw new IllegalStateException("Expected a single fragment output buffer");
         }
+        if (buffers.isEmpty())
+        {
+            return engine.wrap(EMPTY_BYTE_BUFFER_ARRAY, output.getUnderlyingBuffer());
+        }
+
+        // The engine only needs enough input for a record. Avoid collecting the rest of a large delivery.
+        int bytesNeeded = Math.max(1, engine.getSession().getApplicationBufferSize());
+        final List<ByteBuffer> sources = new ArrayList<>();
+        sourcesLoop: for (final QpidByteBuffer buffer : buffers)
+        {
+            if (buffer instanceof SingleQpidByteBuffer single)
+            {
+                bytesNeeded = addWrapSource(sources, single, bytesNeeded);
+                if (bytesNeeded <= 0)
+                {
+                    break;
+                }
+            }
+            else if (buffer instanceof MultiQpidByteBuffer multi)
+            {
+                for (final SingleQpidByteBuffer fragment : multi.getFragments())
+                {
+                    bytesNeeded = addWrapSource(sources, fragment, bytesNeeded);
+                    if (bytesNeeded <= 0)
+                    {
+                        break sourcesLoop;
+                    }
+                }
+            }
+            else
+            {
+                throw new IllegalStateException("Unknown Buffer Implementation");
+            }
+        }
+        return engine.wrap(sources.toArray(EMPTY_BYTE_BUFFER_ARRAY), output.getUnderlyingBuffer());
+    }
+
+    private static int addWrapSource(final List<ByteBuffer> sources,
+                                     final SingleQpidByteBuffer fragment,
+                                     final int bytesNeeded)
+    {
+        final ByteBuffer source = fragment.getUnderlyingBuffer();
+        if (source.hasRemaining())
+        {
+            sources.add(source);
+        }
+        return bytesNeeded - source.remaining();
     }
 
     static SSLEngineResult decryptSSL(final SSLEngine engine, final QpidByteBuffer src, final QpidByteBuffer dst)
@@ -278,6 +309,15 @@ final class QpidByteBufferFactory
             gzipStream.flush();
             return compressedOutput.fetchAccumulatedBuffer();
         }
+    }
+
+    static long write(final GatheringByteChannel channel, final QpidByteBuffer buffer) throws IOException
+    {
+        if (buffer instanceof SingleQpidByteBuffer single)
+        {
+            return channel.write(single.getUnderlyingBuffer());
+        }
+        return write(channel, List.of(buffer));
     }
 
     static long write(final GatheringByteChannel channel, final Collection<QpidByteBuffer> qpidByteBuffers) throws IOException

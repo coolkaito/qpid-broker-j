@@ -104,7 +104,7 @@ public class NonBlockingConnectionPlainDelegate implements NonBlockingConnection
     {
         if (buffers.isEmpty())
         {
-            return new WriteResult(true, 0);
+            return new WriteResult(true, 0, 0);
         }
 
         final long bytesWritten = _parent.writeToTransport(buffers);
@@ -117,7 +117,7 @@ public class NonBlockingConnectionPlainDelegate implements NonBlockingConnection
                 break;
             }
         }
-        return new WriteResult(complete, bytesWritten);
+        return new WriteResult(complete, bytesWritten, bytesWritten);
     }
 
     @Override

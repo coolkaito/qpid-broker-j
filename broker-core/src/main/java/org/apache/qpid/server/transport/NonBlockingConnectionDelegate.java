@@ -32,11 +32,13 @@ interface NonBlockingConnectionDelegate
     {
         final boolean _complete;
         final long _bytesConsumed;
+        final long _socketBytesWritten;
 
-        public WriteResult(final boolean complete, final long bytesConsumed)
+        public WriteResult(final boolean complete, final long bytesConsumed, final long socketBytesWritten)
         {
             _complete = complete;
             _bytesConsumed = bytesConsumed;
+            _socketBytesWritten = socketBytesWritten;
         }
 
         public boolean isComplete()
@@ -48,9 +50,19 @@ interface NonBlockingConnectionDelegate
         {
             return _bytesConsumed;
         }
+
+        public long getSocketBytesWritten()
+        {
+            return _socketBytesWritten;
+        }
     }
 
     WriteResult doWrite(Collection<QpidByteBuffer> buffers) throws IOException;
+
+    default int getBufferedOutputSize()
+    {
+        return 0;
+    }
 
     boolean readyForRead();
 

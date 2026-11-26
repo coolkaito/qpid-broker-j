@@ -139,14 +139,14 @@ class NonBlockingConnectionSchedulingTest extends UnitTestBase
                     "An independent TLS connection must progress while the first socket is blocked");
 
             blocked._client.getOutputStream().write(42 + round);
-            assertEquals(Integer.valueOf(42 + round), blocked._received.poll(TIMEOUT_MILLIS, TimeUnit.MILLISECONDS),
-                    "TLS input must still be decrypted while encrypted output is blocked");
-            blocked.awaitWriteInterest();
-            assertTrue(blocked._blocked.get(), "Reading peer input must not briefly resume blocked consumers");
+            assertFalse(blocked._connection.wantsRead(),
+                    "Saturated output must pause reads that could enqueue replies");
 
             assertArrayEquals(payload, blocked._client.getInputStream().readNBytes(payload.length));
             assertArrayEquals(marker, blocked._client.getInputStream().readNBytes(marker.length),
                     "Pending output must resume without losing or reordering application bytes");
+            assertEquals(Integer.valueOf(42 + round), blocked._received.poll(TIMEOUT_MILLIS, TimeUnit.MILLISECONDS),
+                    "TLS input must be decrypted when output capacity returns");
             blocked.awaitSelection(false);
             assertFalse(blocked._blocked.get(), "Draining encrypted output must resume consumers");
         }

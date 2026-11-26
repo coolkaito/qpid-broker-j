@@ -64,6 +64,12 @@ public interface QpidByteBuffer extends AutoCloseable
         return QpidByteBufferFactory.encryptSSL(engine, buffers, dest);
     }
 
+    /** Appends retained views of the source's remaining fragments in order. */
+    static void addDuplicateFragments(final QpidByteBuffer source, final Collection<QpidByteBuffer> target)
+    {
+        QpidByteBufferFactory.addDuplicateFragments(source, target);
+    }
+
 
     static SSLEngineResult decryptSSL(SSLEngine engine, QpidByteBuffer src, QpidByteBuffer dst) throws SSLException
     {
@@ -102,6 +108,11 @@ public interface QpidByteBuffer extends AutoCloseable
                       final int maxBuffers) throws IOException
     {
         return QpidByteBufferFactory.write(channel, qpidByteBuffers, maxBuffers);
+    }
+
+    static long write(final GatheringByteChannel channel, final QpidByteBuffer buffer) throws IOException
+    {
+        return QpidByteBufferFactory.write(channel, buffer);
     }
 
     static QpidByteBuffer wrap(ByteBuffer wrap)

@@ -804,7 +804,7 @@ public abstract class AbstractAMQPConnection<C extends AbstractAMQPConnection<C,
     {
         if (writerDelay > 0)
         {
-            _aggregateTicker.addTicker(new ServerIdleWriteTimeoutTicker(this, (int) writerDelay));
+            _aggregateTicker.addTicker(new ServerIdleWriteTimeoutTicker(_network, this, (int) writerDelay));
             _network.setMaxWriteIdleMillis(writerDelay);
         }
 

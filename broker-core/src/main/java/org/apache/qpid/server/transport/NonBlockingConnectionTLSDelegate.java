@@ -22,13 +22,8 @@ package org.apache.qpid.server.transport;
 import java.io.IOException;
 import java.security.Principal;
 import java.security.cert.Certificate;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
-import java.util.ListIterator;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLEngine;
@@ -54,7 +49,7 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
     private final NonBlockingConnection _parent;
     private final int _networkBufferSize;
     private SSLEngineResult _status;
-    private final List<QpidByteBuffer> _encryptedOutput = new ArrayList<>();
+    private volatile int _encryptedOutputSize;
     private Principal _principal;
     private Certificate _peerCertificate;
     private boolean _principalChecked;
@@ -64,7 +59,7 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
     private QpidByteBuffer _netInputBuffer;
     private QpidByteBuffer _netOutputBuffer;
     private QpidByteBuffer _applicationBuffer;
-    private final AtomicInteger _loopingCounter = new AtomicInteger(0);
+    private int _consecutiveWrapsWithoutProgress;
     private final boolean _enableDiagnosisOfSslEngineLooping;
     private final long _diagnosisOfSslEngineLoopingWarnThreshold;
     private final long _diagnosisOfSslEngineLoopingBreakThreshold;
@@ -180,46 +175,58 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
     @Override
     public WriteResult doWrite(final Collection<QpidByteBuffer> buffers) throws IOException
     {
-        final int bufCount = buffers.size();
-
-        final int totalConsumed = wrapBufferArray(buffers);
+        long totalConsumed = 0;
+        // Reuse the output buffer only after all of its ciphertext has been written.
+        if (_encryptedOutputSize == 0)
+        {
+            _netOutputBuffer.clear();
+            try
+            {
+                totalConsumed = wrapOutput(buffers);
+            }
+            finally
+            {
+                _netOutputBuffer.flip();
+                _encryptedOutputSize = _netOutputBuffer.remaining();
+            }
+        }
         if (_parent.checkForWriteAbort())
         {
-            return new WriteResult(false, totalConsumed);
+            return new WriteResult(false, totalConsumed, 0);
         }
 
-        boolean bufsSent = true;
-        final Iterator<QpidByteBuffer> itr = buffers.iterator();
-        int bufIndex = 0;
-        while(itr.hasNext() && bufsSent && bufIndex++ < bufCount)
+        final long bytesWritten;
+        try
         {
-            QpidByteBuffer buf = itr.next();
-            bufsSent = !buf.hasRemaining();
+            bytesWritten = _netOutputBuffer.hasRemaining() ? _parent.writeToTransport(_netOutputBuffer) : 0;
+        }
+        finally
+        {
+            _encryptedOutputSize = _netOutputBuffer.remaining();
         }
 
-        if(!_encryptedOutput.isEmpty())
+        final SSLEngineResult.HandshakeStatus handshakeStatus = _sslEngine.getHandshakeStatus();
+        final boolean outputDrained = !_netOutputBuffer.hasRemaining();
+        _needsReadForWrite = outputDrained && handshakeStatus == SSLEngineResult.HandshakeStatus.NEED_UNWRAP;
+        boolean complete = outputDrained && handshakeStatus != SSLEngineResult.HandshakeStatus.NEED_WRAP;
+        if (complete)
         {
-            _parent.writeToTransport(_encryptedOutput);
-
-            ListIterator<QpidByteBuffer> iter = _encryptedOutput.listIterator();
-            while (iter.hasNext())
+            for (final QpidByteBuffer buffer : buffers)
             {
-                QpidByteBuffer buf = iter.next();
-                if (!buf.hasRemaining())
+                if (buffer.hasRemaining())
                 {
-                    buf.dispose();
-                    iter.remove();
-                }
-                else
-                {
+                    complete = false;
                     break;
                 }
             }
         }
+        return new WriteResult(complete, totalConsumed, bytesWritten);
+    }
 
-        _needsReadForWrite = _encryptedOutput.isEmpty() &&
-                _sslEngine.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_UNWRAP;
-        return new WriteResult(bufsSent && _encryptedOutput.isEmpty(), totalConsumed);
+    @Override
+    public int getBufferedOutputSize()
+    {
+        return _encryptedOutputSize;
     }
 
     @Override
@@ -264,106 +271,95 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
 
     }
 
-    private int wrapBufferArray(final Collection<QpidByteBuffer> buffers) throws SSLException
+    private long wrapOutput(final Collection<QpidByteBuffer> buffers) throws SSLException
     {
-        int totalConsumed = 0;
-        boolean encrypted;
+        long totalConsumed = 0;
+        boolean encrypted = false;
         do
         {
             if (_parent.checkForWriteAbort())
             {
                 return totalConsumed;
             }
-            if(_sslEngine.getHandshakeStatus() != SSLEngineResult.HandshakeStatus.NEED_UNWRAP)
+            final SSLEngineResult.HandshakeStatus handshakeStatus = _sslEngine.getHandshakeStatus();
+            if (handshakeStatus == SSLEngineResult.HandshakeStatus.NEED_UNWRAP)
             {
-                if(_netOutputBuffer.remaining() < _sslEngine.getSession().getPacketBufferSize())
+                _consecutiveWrapsWithoutProgress = 0;
+                break;
+            }
+            final int packetBufferSize = _sslEngine.getSession().getPacketBufferSize();
+            if (_netOutputBuffer.remaining() < packetBufferSize)
+            {
+                if (packetBufferSize > _networkBufferSize)
                 {
-                    if(_netOutputBuffer.position() != 0)
-                    {
-                        _netOutputBuffer.flip();
-                        _encryptedOutput.add(_netOutputBuffer);
-                    }
-                    else
-                    {
-                        _netOutputBuffer.dispose();
-                    }
-                    _netOutputBuffer = QpidByteBuffer.allocateDirect(_networkBufferSize);
+                    throw new SSLException("TLS packet buffer size " + packetBufferSize +
+                            " exceeds network buffer size " + _networkBufferSize);
                 }
+                break;
+            }
 
-                _status = QpidByteBuffer.encryptSSL(_sslEngine, buffers, _netOutputBuffer);
-                if(_status.getStatus() == SSLEngineResult.Status.CLOSED)
+            _status = QpidByteBuffer.encryptSSL(_sslEngine, buffers, _netOutputBuffer);
+            if (_status.getStatus() == SSLEngineResult.Status.CLOSED)
+            {
+                throw new SSLException(String.format("SSLEngine.wrap operation could not be completed because" +
+                                " it was already closed (status %s, handshake status %s)",
+                        _status.getStatus(), _status.getHandshakeStatus()));
+            }
+            // QPID-8489: workaround for JDK 8 bug to avoid tight looping for half closed connections
+            // Additional info: https://bugs.openjdk.java.net/browse/JDK-8240071,
+            // http://mail.openjdk.java.net/pipermail/security-dev/2019-January/019142.html
+            final int produced = _status.bytesProduced();
+            if (produced < 1 && _status.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_WRAP &&
+                    !_sslEngine.isOutboundDone() && _sslEngine.isInboundDone())
+            {
+                throw new SSLException(String.format("SSLEngine.wrap produced 0 bytes (status %s, handshake status %s)",
+                        _status.getStatus(), _status.getHandshakeStatus()));
+            }
+            encrypted = produced > 0;
+            final int consumed = _status.bytesConsumed();
+            totalConsumed += consumed;
+            if (consumed > 0)
+            {
+                _parent.releaseConsumedBuffers(buffers);
+            }
+            final boolean tasksRun = runSSLEngineTasks(_status, true);
+            if (_parent.checkForWriteAbort())
+            {
+                return totalConsumed;
+            }
+            if (!encrypted && consumed == 0 && !tasksRun &&
+                    handshakeStatus == SSLEngineResult.HandshakeStatus.NEED_WRAP &&
+                    _sslEngine.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_WRAP &&
+                    (_status.getStatus() != SSLEngineResult.Status.BUFFER_OVERFLOW || _netOutputBuffer.position() == 0))
+            {
+                throw new SSLException("SSLEngine.wrap made no progress while waiting to produce handshake output");
+            }
+            if (_enableDiagnosisOfSslEngineLooping)
+            {
+                if (consumed > 0 || tasksRun || handshakeStatus != _sslEngine.getHandshakeStatus() ||
+                        (!encrypted && _status.getStatus() != SSLEngineResult.Status.BUFFER_OVERFLOW))
                 {
-                    throw new SSLException(String.format("SSLEngine.wrap operation could not be completed because"
-                                    + " it was already closed (status %s, handshake status %s)",
-                            _status.getStatus(), _status.getHandshakeStatus()));
+                    _consecutiveWrapsWithoutProgress = 0;
                 }
-                // QPID-8489: workaround for JDK 8 bug to avoid tight looping for half closed connections
-                // Additional info: https://bugs.openjdk.java.net/browse/JDK-8240071,
-                // http://mail.openjdk.java.net/pipermail/security-dev/2019-January/019142.html
-                if(_status.bytesProduced() < 1 && _status.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_WRAP
-                        && !_sslEngine.isOutboundDone() && _sslEngine.isInboundDone())
+                else if (encrypted)
                 {
-                    throw new SSLException(String.format("SSLEngine.wrap produced 0 bytes (status %s, handshake status %s)",
-                            _status.getStatus(), _status.getHandshakeStatus()));
-                }
-                encrypted = _status.bytesProduced() > 0;
-                totalConsumed += _status.bytesConsumed();
-                runSSLEngineTasks(_status, true);
-                if (_parent.checkForWriteAbort())
-                {
-                    return totalConsumed;
-                }
-                if(encrypted && _netOutputBuffer.remaining() < _sslEngine.getSession().getPacketBufferSize())
-                {
-                    _netOutputBuffer.flip();
-                    _encryptedOutput.add(_netOutputBuffer);
-                    _netOutputBuffer = QpidByteBuffer.allocateDirect(_networkBufferSize);
-                }
-                // SSLEngine looping circuit breaker
-                if (_enableDiagnosisOfSslEngineLooping)
-                {
-                    _loopingCounter.incrementAndGet();
-                    if (_loopingCounter.get() > _diagnosisOfSslEngineLoopingWarnThreshold)
+                    final int consecutiveWraps = ++_consecutiveWrapsWithoutProgress;
+                    if (consecutiveWraps > _diagnosisOfSslEngineLoopingWarnThreshold)
                     {
-                        LOGGER.warn("SSLEngine looping detected, _status: {}, _sslEngine.isOutboundDone(): {}, _sslEngine.isInboundDone(): {}, "
-                                        + "_sslEngine.getPeerHost(): {}, _sslEngine.getPeerPort(): {}",
-                                "[ Status = " + _status.getStatus() + ", HandshakeStatus = " + _status.getHandshakeStatus()
-                                        + ", bytesConsumed = " + _status.bytesConsumed() + ", bytesProduced = " + _status.bytesProduced() + " ]",
-                                _sslEngine.isOutboundDone(),
-                                _sslEngine.isInboundDone(),
-                                _sslEngine.getPeerHost(),
-                                _sslEngine.getPeerPort()
-                        );
+                        LOGGER.warn("SSLEngine looping detected, status: {}, handshake status: {}, " +
+                                        "bytes consumed: {}, bytes produced: {}, peer host: {}, peer port: {}",
+                                _status.getStatus(), _status.getHandshakeStatus(), consumed, produced,
+                                _sslEngine.getPeerHost(), _sslEngine.getPeerPort());
                     }
-                    if (_loopingCounter.get() > _diagnosisOfSslEngineLoopingBreakThreshold)
+                    if (consecutiveWraps > _diagnosisOfSslEngineLoopingBreakThreshold)
                     {
                         throw new SSLException("SSLEngine looping detected, executing circuit breaker");
                     }
                 }
             }
-            else
-            {
-                encrypted = false;
-            }
-
         }
-        while(encrypted && _sslEngine.getHandshakeStatus() != SSLEngineResult.HandshakeStatus.NEED_UNWRAP);
+        while (encrypted);
 
-        if (_enableDiagnosisOfSslEngineLooping && encrypted)
-        {
-            _loopingCounter.set(0);
-        }
-
-        if(_netOutputBuffer.position() != 0)
-        {
-            final QpidByteBuffer outputBuffer = _netOutputBuffer;
-
-            _netOutputBuffer = _netOutputBuffer.slice();
-
-            outputBuffer.flip();
-            _encryptedOutput.add(outputBuffer);
-
-        }
         return totalConsumed;
     }
 
@@ -476,16 +472,12 @@ public class NonBlockingConnectionTLSDelegate implements NonBlockingConnectionDe
     @Override
     public void shutdownOutput()
     {
-        for (final QpidByteBuffer buffer : _encryptedOutput)
-        {
-            buffer.dispose();
-        }
-        _encryptedOutput.clear();
         if (_netOutputBuffer != null)
         {
             _netOutputBuffer.dispose();
             _netOutputBuffer = null;
         }
+        _encryptedOutputSize = 0;
         try
         {
             _sslEngine.closeOutbound();

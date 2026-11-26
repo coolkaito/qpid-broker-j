@@ -66,6 +66,17 @@ final class NonBlockingConnectionTestHelper
         when(socket.getLocalSocketAddress()).thenReturn(new InetSocketAddress("localhost", 5672));
         final SocketChannel channel = mock(SocketChannel.class);
         when(channel.socket()).thenReturn(socket);
+        when(channel.write(any(ByteBuffer.class))).thenAnswer(invocation ->
+        {
+            final ByteBuffer buffer = invocation.getArgument(0);
+            if (writable.getAsBoolean())
+            {
+                final int written = buffer.remaining();
+                buffer.position(buffer.limit());
+                return written;
+            }
+            return 0;
+        });
         when(channel.write(any(ByteBuffer[].class))).thenAnswer(invocation ->
         {
             long written = 0;

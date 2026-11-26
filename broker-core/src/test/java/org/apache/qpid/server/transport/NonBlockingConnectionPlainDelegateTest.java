@@ -22,7 +22,7 @@ package org.apache.qpid.server.transport;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -67,7 +67,7 @@ class NonBlockingConnectionPlainDelegateTest extends UnitTestBase
 
         assertTrue(result.isComplete(), "Empty collection should be complete");
         assertEquals(0, result.getBytesConsumed(), "Empty collection should not consume bytes");
-        verify(_connection, never()).writeToTransport(any());
+        verify(_connection, never()).writeToTransport(anyCollection());
     }
 
     @Test

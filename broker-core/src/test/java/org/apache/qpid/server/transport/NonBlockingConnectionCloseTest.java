@@ -35,6 +35,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -129,7 +130,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         assertTrue(_connection.doWork());
         assertTrue(_connection.doWork(), "Shutdown must be idempotent");
 
-        verify(_socket, never()).write(any(ByteBuffer[].class));
+        verifyNoSocketWrites();
         verify(_engine, never()).processPendingIterator();
         verify(_selectionTask).wakeup();
         assertClosedAndReleased();
@@ -154,7 +155,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         assertTrue(_connection.doWork(), "Deadline expiry must stop the active pending-work loop");
 
         verify(pending, never()).run();
-        verify(_socket, never()).write(any(ByteBuffer[].class));
+        verifyNoSocketWrites();
         assertClosedAndReleased();
     }
 
@@ -173,7 +174,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
 
         assertTrue(_connection.doWork(), "A deadline installed during processing must prevent the final pending write");
 
-        verify(_socket, never()).write(any(ByteBuffer[].class));
+        verifyNoSocketWrites();
         assertClosedAndReleased();
     }
 
@@ -200,11 +201,19 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
             expired.set(true);
             return written;
         });
+        when(_socket.write(any(ByteBuffer.class))).thenAnswer(invocation ->
+        {
+            final ByteBuffer buffer = invocation.getArgument(0);
+            final int written = buffer.remaining();
+            buffer.position(buffer.limit());
+            expired.set(true);
+            return written;
+        });
 
         assertTrue(_connection.doWork(), "Successful writes must not postpone deadline enforcement");
 
         verify(pending, never()).run();
-        verify(_socket).write(any(ByteBuffer[].class));
+        verifySocketWrite(verify(_socket));
         assertClosedAndReleased();
     }
 
@@ -225,7 +234,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         assertTrue(_connection.doWork());
 
         verify(pending, never()).run();
-        verify(_socket, never()).write(any(ByteBuffer[].class));
+        verifyNoSocketWrites();
         assertClosedAndReleased();
     }
 
@@ -239,14 +248,11 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         {
             _connection.send(output);
         }
-        when(_socket.write(any(ByteBuffer[].class))).thenAnswer(invocation ->
+        when(_socket.write(any(ByteBuffer.class))).thenAnswer(invocation ->
         {
-            long written = 0;
-            for (final ByteBuffer buffer : (ByteBuffer[]) invocation.getArgument(0))
-            {
-                written += buffer.remaining();
-                buffer.position(buffer.limit());
-            }
+            final ByteBuffer buffer = invocation.getArgument(0);
+            final int written = buffer.remaining();
+            buffer.position(buffer.limit());
             expired.set(true);
             // Only wrapping after expiry matters, regardless of how the output was batched.
             clearInvocations(_sslEngine);
@@ -255,7 +261,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
 
         assertTrue(_connection.doWork());
 
-        verify(_socket).write(any(ByteBuffer[].class));
+        verifySocketWrite(verify(_socket));
         verify(_sslEngine, never()).wrap(any(ByteBuffer[].class), any(ByteBuffer.class));
         verify(_engine, never()).setTransportBlockedForWriting(anyBoolean());
         assertClosedAndReleased();
@@ -288,7 +294,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
 
         assertAll(() -> verify(_sslEngine).wrap(any(ByteBuffer[].class), any(ByteBuffer.class)),
                   () -> verify(delegatedTask, never()).run(),
-                  () -> verify(_socket, never()).write(any(ByteBuffer[].class)),
+                  () -> verifyNoSocketWrites(),
                   this::assertClosedAndReleased);
     }
 
@@ -317,7 +323,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         assertTrue(_connection.doWork());
 
         verify(_sslEngine).wrap(any(ByteBuffer[].class), any(ByteBuffer.class));
-        verify(_socket, never()).write(any(ByteBuffer[].class));
+        verifyNoSocketWrites();
         assertClosedAndReleased();
     }
 
@@ -343,7 +349,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         assertTrue(_connection.doWork());
 
         assertAll(() -> verify(_sslEngine).wrap(any(ByteBuffer[].class), any(ByteBuffer.class)),
-                  () -> verify(_socket, never()).write(any(ByteBuffer[].class)),
+                  () -> verifyNoSocketWrites(),
                   this::assertClosedAndReleased);
     }
 
@@ -370,7 +376,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
 
         assertAll(() -> verify(_sslEngine).wrap(any(ByteBuffer[].class), any(ByteBuffer.class)),
                   () -> verify(laterTask, never()).run(),
-                  () -> verify(_socket, never()).write(any(ByteBuffer[].class)),
+                  () -> verifyNoSocketWrites(),
                   this::assertClosedAndReleased);
     }
 
@@ -391,7 +397,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         assertTrue(_connection.doWork());
 
         verify(delegatedTask).run();
-        verify(_socket).write(any(ByteBuffer[].class));
+        verify(_socket, times(2)).write(any(ByteBuffer.class));
         assertFalse(_connection.wantsWrite(), "Graceful close must wrap and drain the plaintext backlog");
         assertClosedAndReleased();
     }
@@ -413,7 +419,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         assertTrue(_connection.doWork());
 
         verify(pending, never()).run();
-        verify(_socket).write(any(ByteBuffer[].class));
+        verifySocketWrite(verify(_socket, times(encryption == TransportEncryption.TLS ? 2 : 1)));
         assertClosedAndReleased();
     }
 
@@ -428,7 +434,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
 
         assertTrue(_connection.doWork());
 
-        verify(_socket, never()).write(any(ByteBuffer[].class));
+        verifyNoSocketWrites();
         verify(_sslEngine, never()).wrap(any(ByteBuffer[].class), any(ByteBuffer.class));
         assertClosedAndReleased();
     }
@@ -445,7 +451,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
 
         assertTrue(_connection.doWork());
 
-        verify(_socket, never()).write(any(ByteBuffer[].class));
+        verifyNoSocketWrites();
         assertClosedAndReleased();
     }
 
@@ -462,12 +468,17 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
             expired.set(true);
             return 0L;
         }).when(_socket).write(any(ByteBuffer[].class));
+        doAnswer(invocation ->
+        {
+            expired.set(true);
+            return 0;
+        }).when(_socket).write(any(ByteBuffer.class));
         _connection.close();
         clearInvocations(_socket);
 
         assertTrue(_connection.doWork());
 
-        verify(_socket).write(any(ByteBuffer[].class));
+        verifySocketWrite(verify(_socket));
         assertClosedAndReleased();
     }
 
@@ -483,7 +494,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
 
         assertTrue(_connection.doWork());
 
-        verify(_socket, never()).write(any(ByteBuffer[].class));
+        verifyNoSocketWrites();
         assertClosedAndReleased();
     }
 
@@ -499,7 +510,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
 
         assertTrue(_connection.doWork());
 
-        verify(_socket).write(any(ByteBuffer[].class));
+        verifySocketWrite(verify(_socket, times(encryption == TransportEncryption.TLS ? 2 : 1)));
         assertClosedAndReleased();
     }
 
@@ -605,10 +616,10 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         assertTrue(_connection.doWork());
 
         verify(_engine).received(any(QpidByteBuffer.class));
-        verify(_socket, atLeastOnce()).write(any(ByteBuffer[].class));
+        verifySocketWrite(verify(_socket, atLeastOnce()));
         final InOrder shutdownOrder = inOrder(_engine, _socket);
         shutdownOrder.verify(_engine).setIOThread(null);
-        shutdownOrder.verify(_socket, atLeastOnce()).write(any(ByteBuffer[].class));
+        verifySocketWrite(shutdownOrder.verify(_socket, atLeastOnce()));
         verify(_engine, never()).setTransportBlockedForWriting(anyBoolean());
         assertFalse(_connection.wantsWrite(), "Graceful close must drain queued output");
         assertClosedAndReleased();
@@ -629,7 +640,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
         assertFalse(_connection.doWork());
 
         verify(_engine).received(any(QpidByteBuffer.class));
-        verify(_socket).write(any(ByteBuffer[].class));
+        verifySocketWrite(verify(_socket));
         verify(_socket, never()).close();
     }
 
@@ -668,7 +679,7 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
     private void assertNoIoAfterReadClose(final boolean closed)
     {
         assertAll(() -> assertTrue(closed, "Read-side closure must finish in the same work cycle"),
-                  () -> verify(_socket, never()).write(any(ByteBuffer[].class)),
+                  () -> verifyNoSocketWrites(),
                   () ->
                   {
                       if (_sslEngine != null)
@@ -678,6 +689,24 @@ class NonBlockingConnectionCloseTest extends UnitTestBase
                   },
                   () -> verify(_engine, never()).setTransportBlockedForWriting(anyBoolean()),
                   this::assertClosedAndReleased);
+    }
+
+    private void verifySocketWrite(final SocketChannel socket) throws IOException
+    {
+        if (_sslEngine == null)
+        {
+            socket.write(any(ByteBuffer[].class));
+        }
+        else
+        {
+            socket.write(any(ByteBuffer.class));
+        }
+    }
+
+    private void verifyNoSocketWrites() throws IOException
+    {
+        verify(_socket, never()).write(any(ByteBuffer[].class));
+        verify(_socket, never()).write(any(ByteBuffer.class));
     }
 
     private void assertClosedAndReleased() throws IOException

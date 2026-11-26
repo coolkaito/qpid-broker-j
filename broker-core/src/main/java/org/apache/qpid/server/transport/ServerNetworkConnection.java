@@ -36,6 +36,11 @@ public interface ServerNetworkConnection extends NetworkConnection
         close();
     }
 
+    default boolean hasPendingWrites()
+    {
+        return false;
+    }
+
     default void closeOnReadIdle(final Runnable logIdleClose)
     {
         logIdleClose.run();
